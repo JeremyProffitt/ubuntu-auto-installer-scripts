@@ -1,0 +1,3 @@
+# This file is required for cloud-init but can be minimal
+instance-id: ubuntu-autoinstall
+local-hostname: ubuntu-server

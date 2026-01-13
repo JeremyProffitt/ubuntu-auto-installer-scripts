@@ -1,0 +1,164 @@
+#cloud-config
+autoinstall:
+  version: 1
+
+  # Interactive mode - ask for target disk
+  interactive-sections:
+    - storage
+
+  # Locale and keyboard
+  locale: ${LOCALE:-en_US.UTF-8}
+  keyboard:
+    layout: ${KEYBOARD_LAYOUT:-us}
+
+  # Identity configuration (populated by setup script)
+  identity:
+    hostname: ${INSTALL_HOSTNAME:-ubuntu-server}
+    username: ${INSTALL_USERNAME:-admin}
+    # Password hash will be inserted by the USB creation script
+    password: ${PASSWORD_HASH}
+
+  # SSH configuration
+  ssh:
+    install-server: true
+    allow-pw: true
+    authorized-keys: []
+
+  # Network - DHCP by default
+  network:
+    version: 2
+    ethernets:
+      id0:
+        match:
+          driver: "*"
+        dhcp4: true
+        dhcp6: true
+
+  # Timezone
+  timezone: ${TIMEZONE:-America/New_York}
+
+  # Package configuration
+  apt:
+    primary:
+      - arches: [default]
+        uri: http://archive.ubuntu.com/ubuntu
+    geoip: true
+
+  # Packages to install during installation
+  packages:
+    # Essential firmware and drivers
+    - linux-firmware
+    - intel-microcode
+    - amd64-microcode
+
+    # Build tools for DKMS
+    - build-essential
+    - dkms
+    - linux-headers-generic
+
+    # Network tools
+    - network-manager
+    - wpasupplicant
+    - wireless-tools
+    - ethtool
+    - net-tools
+
+    # Storage and partitioning tools
+    - nvme-cli
+    - smartmontools
+    - hdparm
+    - mdadm
+    - lvm2
+    - parted
+    - gdisk
+    - ntfs-3g
+    - exfat-fuse
+    - exfatprogs
+
+    # System utilities
+    - openssh-server
+    - curl
+    - wget
+    - git
+    - htop
+    - vim
+    - tmux
+    - unzip
+
+    # Hardware monitoring
+    - lm-sensors
+    - i2c-tools
+    - fancontrol
+
+    # Power management
+    - thermald
+    - powertop
+
+    # Audio (always install for compatibility)
+    - alsa-utils
+    - alsa-base
+
+    # USB utilities
+    - usbutils
+    - pciutils
+
+    # Firmware update daemon
+    - fwupd
+
+  # Late commands run in the installed system (chroot)
+  late-commands:
+    # Create directories for scripts
+    - mkdir -p /target/opt/ubuntu-installer-scripts
+    - mkdir -p /target/opt/ubuntu-installer
+
+    # Copy all scripts
+    - cp /cdrom/scripts/install-drivers.sh /target/opt/ubuntu-installer-scripts/
+    - cp /cdrom/scripts/post-install.sh /target/opt/ubuntu-installer-scripts/
+    - cp /cdrom/scripts/mount-drives.sh /target/opt/ubuntu-installer-scripts/
+    - cp /cdrom/scripts/install-gui.sh /target/opt/ubuntu-installer-scripts/
+    - cp /cdrom/scripts/configure-drives.sh /target/opt/ubuntu-installer-scripts/
+    - cp /cdrom/scripts/install-optional-features.sh /target/opt/ubuntu-installer-scripts/
+    - chmod +x /target/opt/ubuntu-installer-scripts/*.sh
+
+    # Create symlinks in /opt for backward compatibility
+    - ln -sf /opt/ubuntu-installer-scripts/install-drivers.sh /target/opt/install-drivers.sh
+    - ln -sf /opt/ubuntu-installer-scripts/post-install.sh /target/opt/post-install.sh
+    - ln -sf /opt/ubuntu-installer-scripts/mount-drives.sh /target/opt/mount-drives.sh
+    - ln -sf /opt/ubuntu-installer-scripts/install-gui.sh /target/opt/install-gui.sh
+    - ln -sf /opt/ubuntu-installer-scripts/configure-drives.sh /target/opt/configure-drives.sh
+    - ln -sf /opt/ubuntu-installer-scripts/install-optional-features.sh /target/opt/install-optional-features.sh
+
+    # Copy configuration
+    - cp /cdrom/scripts/config.env /target/opt/ubuntu-installer/config.env
+
+    # Create systemd service for first-boot setup
+    - |
+      cat > /target/etc/systemd/system/first-boot-setup.service << 'EOF'
+      [Unit]
+      Description=First Boot Setup - Install Drivers and Configure System
+      After=network-online.target getty.target
+      Wants=network-online.target
+      ConditionPathExists=/opt/ubuntu-installer-scripts/post-install.sh
+
+      [Service]
+      Type=oneshot
+      ExecStart=/opt/ubuntu-installer-scripts/post-install.sh
+      ExecStartPost=/bin/systemctl disable first-boot-setup.service
+      RemainAfterExit=yes
+      StandardInput=tty
+      StandardOutput=tty
+      StandardError=tty
+      TTYPath=/dev/tty1
+      TTYReset=yes
+      TTYVHangup=yes
+
+      [Install]
+      WantedBy=multi-user.target
+      EOF
+    - curtin in-target --target=/target -- systemctl enable first-boot-setup.service
+
+    # Enable SSH
+    - curtin in-target --target=/target -- systemctl enable ssh
+
+    # Update initramfs with NVMe support
+    - curtin in-target --target=/target -- update-initramfs -u -k all

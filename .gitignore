@@ -1,0 +1,47 @@
+# Environment files with secrets
+.env
+*.env.local
+
+# Ubuntu ISO files
+*.iso
+
+# Generated USB images
+*.img
+*.raw
+
+# Build artifacts
+/build/
+/dist/
+/output/
+
+# Go build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+
+# IDE files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+logs/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Downloaded firmware/drivers
+/downloads/
+/firmware/
