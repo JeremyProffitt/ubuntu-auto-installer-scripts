@@ -16,6 +16,7 @@ This installer is specifically designed and tested for:
 
 ## Features
 
+- **Docker pre-installed** - Container runtime ready out of the box
 - **Automatic driver installation** for all supported hardware
 - **Interactive disk selection** during installation
 - **Interactive drive configuration** - format, partition, and name mount points
@@ -23,6 +24,7 @@ This installer is specifically designed and tested for:
 - **Auto-mount all drives** after installation
 - **Optional GUI installation** (Ubuntu Desktop or headless server)
 - **RAID array creation** with mdadm
+- **System utilities included** - swap, NTP, btop, ncdu, jq, and more
 - **Configurable via `.env` file**
 - **Works with USB 2.0/3.0 drives**
 
@@ -67,7 +69,7 @@ Edit `.env` to customize your installation:
 ```ini
 # User Configuration
 INSTALL_USERNAME=admin          # Default user account
-INSTALL_PASSWORD=changeme123    # User password
+INSTALL_PASSWORD=changeme123    # User password (change this!)
 INSTALL_HOSTNAME=ubuntu-server  # System hostname
 
 # SSH Configuration
@@ -86,12 +88,15 @@ TIMEZONE=America/New_York       # System timezone
 LOCALE=en_US.UTF-8             # System locale
 KEYBOARD_LAYOUT=us              # Keyboard layout
 
-# Additional packages (comma-separated)
-EXTRA_PACKAGES=htop,vim,curl,wget,git
-
 # Drive Configuration
 INTERACTIVE_DRIVE_CONFIG=true  # Prompt for interactive drive setup on first boot
 AUTO_MOUNT_DRIVES=true         # Auto-mount drives if interactive config skipped
+
+# Enabled by Default
+INSTALL_DOCKER=true            # Docker container runtime
+CONFIGURE_SWAP=true            # 4GB swap file
+CONFIGURE_NTP=true             # Time synchronization
+INSTALL_COMMON_TOOLS=true      # btop, ncdu, jq, rsync, etc.
 ```
 
 ## Project Structure
@@ -199,27 +204,27 @@ The installer includes many optional features that can be enabled in `.env` or i
 
 ### Available Optional Features
 
-| Category | Feature | Description | Port |
-|----------|---------|-------------|------|
-| **Containers** | Docker | Container runtime | - |
-| | Portainer | Docker web UI | 9443 |
-| **Web Management** | Cockpit | Server management UI | 9090 |
-| | Webmin | Classic admin panel | 10000 |
-| **VPN/Remote** | Tailscale | Mesh VPN | - |
-| | ZeroTier | Software-defined network | - |
-| | Wake-on-LAN | Remote power on | - |
-| **Security** | Fail2ban | SSH brute-force protection | - |
-| | UFW | Firewall configuration | - |
-| | SSH Hardening | Secure SSH config | - |
-| | Auto Updates | Unattended security updates | - |
-| **File Sharing** | Samba | Windows file sharing (SMB) | 445 |
-| | NFS | Linux/Unix file sharing | 2049 |
-| **Monitoring** | Prometheus | Metrics database | 9090 |
-| | Node Exporter | System metrics | 9100 |
-| | Grafana | Visualization | 3000 |
-| **System** | Swap | Configure swap space | - |
-| | NTP | Time synchronization | - |
-| | Common Tools | btop, ncdu, jq, etc. | - |
+| Category | Feature | Description | Default | Port |
+|----------|---------|-------------|---------|------|
+| **Containers** | Docker | Container runtime | ✅ ON | - |
+| | Portainer | Docker web UI | OFF | 9443 |
+| **Web Management** | Cockpit | Server management UI | OFF | 9090 |
+| | Webmin | Classic admin panel | OFF | 10000 |
+| **VPN/Remote** | Tailscale | Mesh VPN | OFF | - |
+| | ZeroTier | Software-defined network | OFF | - |
+| | Wake-on-LAN | Remote power on | OFF | - |
+| **Security** | Fail2ban | SSH brute-force protection | OFF | - |
+| | UFW | Firewall configuration | OFF | - |
+| | SSH Hardening | Secure SSH config | OFF | - |
+| | Auto Updates | Unattended security updates | OFF | - |
+| **File Sharing** | Samba | Windows file sharing (SMB) | OFF | 445 |
+| | NFS | Linux/Unix file sharing | OFF | 2049 |
+| **Monitoring** | Prometheus | Metrics database | OFF | 9090 |
+| | Node Exporter | System metrics | OFF | 9100 |
+| | Grafana | Visualization | OFF | 3000 |
+| **System** | Swap (4GB) | Configure swap space | ✅ ON | - |
+| | NTP | Time synchronization | ✅ ON | - |
+| | Common Tools | btop, ncdu, jq, etc. | ✅ ON | - |
 
 ### Quick Presets in .env
 
