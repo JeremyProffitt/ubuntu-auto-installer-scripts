@@ -247,6 +247,8 @@ configure_ufw() {
     [ "${INSTALL_PROMETHEUS:-false}" = "true" ] && ufw allow 9090/tcp comment 'Prometheus'
     [ "${INSTALL_NODE_EXPORTER:-false}" = "true" ] && ufw allow 9100/tcp comment 'Node Exporter'
     [ "${INSTALL_GRAFANA:-false}" = "true" ] && ufw allow 3000/tcp comment 'Grafana'
+    [ "${INSTALL_SIGNOZ:-false}" = "true" ] && ufw allow 3301/tcp comment 'SigNoz'
+    [ "${INSTALL_OTEL_COLLECTOR:-false}" = "true" ] && ufw allow 13133/tcp comment 'OTEL Health Check'
 
     # Enable UFW
     echo "y" | ufw enable
@@ -576,8 +578,222 @@ install_grafana() {
 }
 
 # ============================================================================
+# OBSERVABILITY & TELEMETRY
+# ============================================================================
+
+install_signoz() {
+    if [ "${INSTALL_SIGNOZ:-false}" != "true" ]; then
+        return
+    fi
+
+    if ! command -v docker &> /dev/null; then
+        log_warn "Docker not installed, skipping SigNoz"
+        return
+    fi
+
+    log_section "Installing SigNoz"
+
+    # Create directory for SigNoz
+    mkdir -p /opt/signoz
+    cd /opt/signoz
+
+    # Download docker-compose file
+    curl -sL https://github.com/SigNoz/signoz/releases/latest/download/docker-compose.yaml -o docker-compose.yaml
+
+    # Start SigNoz
+    docker compose up -d
+
+    log_info "SigNoz installed - Access at http://<ip>:3301"
+    log_info "Default credentials: admin@signoz.io / changeit"
+}
+
+install_otel_collector() {
+    if [ "${INSTALL_OTEL_COLLECTOR:-false}" != "true" ]; then
+        return
+    fi
+
+    log_section "Installing OpenTelemetry Collector"
+
+    OTEL_ENDPOINT="${OTEL_ENDPOINT:-signoz-internal.jeremy.ninja:4317}"
+
+    # Download and install OpenTelemetry Collector
+    OTEL_VERSION="0.92.0"
+    cd /tmp
+    wget -q "https://github.com/open-telemetry/opentelemetry-collector-releases/releases/download/v${OTEL_VERSION}/otelcol-contrib_${OTEL_VERSION}_linux_amd64.deb"
+    dpkg -i "otelcol-contrib_${OTEL_VERSION}_linux_amd64.deb"
+
+    # Create configuration directory
+    mkdir -p /etc/otelcol-contrib
+
+    # Create configuration file for host metrics and logs
+    cat > /etc/otelcol-contrib/config.yaml << EOF
+receivers:
+  hostmetrics:
+    collection_interval: 30s
+    scrapers:
+      cpu:
+        metrics:
+          system.cpu.utilization:
+            enabled: true
+      memory:
+        metrics:
+          system.memory.utilization:
+            enabled: true
+      disk:
+        metrics:
+          system.disk.io:
+            enabled: true
+          system.disk.operations:
+            enabled: true
+          system.disk.io_time:
+            enabled: true
+          system.disk.pending_operations:
+            enabled: true
+      filesystem:
+        metrics:
+          system.filesystem.utilization:
+            enabled: true
+      load:
+      network:
+      processes:
+        metrics:
+          system.processes.count:
+            enabled: true
+          system.processes.created:
+            enabled: true
+      process:
+        include:
+          match_type: regexp
+          names: [".*"]
+        metrics:
+          process.cpu.utilization:
+            enabled: true
+          process.memory.utilization:
+            enabled: true
+          process.disk.io:
+            enabled: true
+
+  # System logs from journald
+  journald:
+    directory: /var/log/journal
+    units:
+      - ssh
+      - docker
+      - systemd
+      - cron
+    priority: info
+
+  # File-based logs from /var/log
+  filelog:
+    include:
+      - /var/log/*.log
+      - /var/log/syslog
+      - /var/log/auth.log
+      - /var/log/kern.log
+      - /var/log/apt/*.log
+    exclude:
+      - /var/log/lastlog
+    start_at: end
+    include_file_path: true
+    include_file_name: true
+    operators:
+      - type: regex_parser
+        if: body matches "^(?P<timestamp>\\\\w{3}\\\\s+\\\\d{1,2}\\\\s+\\\\d{2}:\\\\d{2}:\\\\d{2})\\\\s+(?P<hostname>\\\\S+)\\\\s+(?P<program>[^\\\\[]+)(\\\\[(?P<pid>\\\\d+)\\\\])?:\\\\s*(?P<message>.*)\$"
+        regex: "^(?P<timestamp>\\\\w{3}\\\\s+\\\\d{1,2}\\\\s+\\\\d{2}:\\\\d{2}:\\\\d{2})\\\\s+(?P<hostname>\\\\S+)\\\\s+(?P<program>[^\\\\[]+)(\\\\[(?P<pid>\\\\d+)\\\\])?:\\\\s*(?P<message>.*)\$"
+        on_error: send
+      - type: move
+        from: attributes.message
+        to: body
+        if: attributes.message != nil
+
+processors:
+  batch:
+    timeout: 10s
+    send_batch_size: 1000
+  resourcedetection:
+    detectors: [env, system]
+    timeout: 5s
+    override: false
+  resource:
+    attributes:
+      - key: host.name
+        from_attribute: host.name
+        action: upsert
+  attributes/logs:
+    actions:
+      - key: source
+        value: "opentelemetry-collector"
+        action: upsert
+
+exporters:
+  otlp:
+    endpoint: "${OTEL_ENDPOINT}"
+    tls:
+      insecure: true
+    headers:
+      signoz-access-token: ""
+  logging:
+    loglevel: info
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+service:
+  extensions: [health_check, zpages]
+  pipelines:
+    metrics:
+      receivers: [hostmetrics]
+      processors: [resourcedetection, resource, batch]
+      exporters: [otlp, logging]
+    logs:
+      receivers: [filelog, journald]
+      processors: [resourcedetection, resource, attributes/logs, batch]
+      exporters: [otlp, logging]
+EOF
+
+    # Create systemd override for custom config
+    mkdir -p /etc/systemd/system/otelcol-contrib.service.d
+    cat > /etc/systemd/system/otelcol-contrib.service.d/override.conf << 'EOF'
+[Service]
+ExecStart=
+ExecStart=/usr/bin/otelcol-contrib --config=/etc/otelcol-contrib/config.yaml
+EOF
+
+    # Reload and start service
+    systemctl daemon-reload
+    systemctl enable otelcol-contrib
+    systemctl restart otelcol-contrib
+
+    rm -f /tmp/otelcol-contrib_*.deb
+
+    log_info "OpenTelemetry Collector installed"
+    log_info "Sending telemetry to: ${OTEL_ENDPOINT}"
+    log_info "Metrics collected: CPU, Memory, Disk, Filesystem, Network, Processes"
+    log_info "Logs collected: /var/log/*.log, syslog, auth.log, kern.log, journald"
+}
+
+# ============================================================================
 # SYSTEM CONFIGURATION
 # ============================================================================
+
+install_ansible() {
+    if [ "${INSTALL_ANSIBLE:-true}" != "true" ]; then
+        return
+    fi
+
+    log_section "Installing Ansible"
+
+    apt-get update
+    apt-get install -y software-properties-common
+    add-apt-repository -y --update ppa:ansible/ansible
+    apt-get install -y ansible
+
+    log_info "Ansible installed successfully"
+    ansible --version | head -1
+}
 
 configure_swap() {
     if [ "${CONFIGURE_SWAP:-false}" != "true" ]; then
@@ -760,12 +976,18 @@ show_menu() {
     echo " 13. Prometheus + Node Exporter + Grafana"
     echo " 14. Node Exporter Only"
     echo ""
-    echo -e "${YELLOW}System:${NC}"
-    echo " 15. Configure Swap"
-    echo " 16. Wake-on-LAN"
-    echo " 17. Common Tools (btop, ncdu, etc.)"
+    echo -e "${YELLOW}Observability & Telemetry:${NC}"
+    echo " 15. SigNoz (APM & Observability Platform)"
+    echo " 16. OpenTelemetry Collector (Metrics & Logs to SigNoz)"
+    echo " 17. SigNoz + OpenTelemetry Collector"
     echo ""
-    echo " 18. Install ALL recommended for home lab"
+    echo -e "${YELLOW}System:${NC}"
+    echo " 18. Ansible (Automation)"
+    echo " 19. Configure Swap"
+    echo " 20. Wake-on-LAN"
+    echo " 21. Common Tools (btop, ncdu, etc.)"
+    echo ""
+    echo " 22. Install ALL recommended for home lab"
     echo "  0. Exit"
     echo ""
 }
@@ -791,10 +1013,15 @@ interactive_menu() {
             13) INSTALL_PROMETHEUS=true; INSTALL_NODE_EXPORTER=true; INSTALL_GRAFANA=true
                 install_prometheus; install_node_exporter; install_grafana ;;
             14) INSTALL_NODE_EXPORTER=true; install_node_exporter ;;
-            15) CONFIGURE_SWAP=true; configure_swap ;;
-            16) ENABLE_WAKE_ON_LAN=true; configure_wakeonlan ;;
-            17) INSTALL_COMMON_TOOLS=true; install_common_tools ;;
-            18) install_recommended_homelab ;;
+            15) INSTALL_DOCKER=true; INSTALL_SIGNOZ=true; install_docker; install_signoz ;;
+            16) INSTALL_OTEL_COLLECTOR=true; install_otel_collector ;;
+            17) INSTALL_DOCKER=true; INSTALL_SIGNOZ=true; INSTALL_OTEL_COLLECTOR=true
+                install_docker; install_signoz; install_otel_collector ;;
+            18) INSTALL_ANSIBLE=true; install_ansible ;;
+            19) CONFIGURE_SWAP=true; configure_swap ;;
+            20) ENABLE_WAKE_ON_LAN=true; configure_wakeonlan ;;
+            21) INSTALL_COMMON_TOOLS=true; install_common_tools ;;
+            22) install_recommended_homelab ;;
             0)
                 echo "Exiting..."
                 exit 0
@@ -824,6 +1051,7 @@ install_recommended_homelab() {
     INSTALL_COMMON_TOOLS=true
     CONFIGURE_NTP=true
     INSTALL_NODE_EXPORTER=true
+    INSTALL_ANSIBLE=true
 
     install_docker
     install_portainer
@@ -835,6 +1063,7 @@ install_recommended_homelab() {
     configure_wakeonlan
     configure_ntp
     install_node_exporter
+    install_ansible
     install_common_tools
 
     log_info "Recommended home lab stack installed!"
@@ -876,6 +1105,9 @@ main() {
     install_prometheus
     install_node_exporter
     install_grafana
+    install_signoz
+    install_otel_collector
+    install_ansible
     configure_swap
     configure_wakeonlan
     configure_ntp
