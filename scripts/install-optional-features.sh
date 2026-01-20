@@ -919,6 +919,7 @@ install_common_tools() {
         jq \
         yq \
         rsync \
+        tmux \
         screen \
         byobu \
         mc \
@@ -938,6 +939,449 @@ install_common_tools() {
         nload
 
     log_info "Common tools installed"
+}
+
+install_dev_tools() {
+    if [ "${INSTALL_DEV_TOOLS:-false}" != "true" ]; then
+        return
+    fi
+
+    log_section "Installing Development Tools"
+
+    INSTALL_USERNAME="${INSTALL_USERNAME:-admin}"
+    USER_HOME=$(eval echo ~$INSTALL_USERNAME)
+
+    # Install build essentials and archive tools
+    apt-get update
+    apt-get install -y \
+        build-essential \
+        git \
+        git-lfs \
+        curl \
+        wget \
+        zip \
+        unzip \
+        rar \
+        unrar \
+        p7zip-full \
+        p7zip-rar \
+        xz-utils \
+        software-properties-common
+
+    # -------------------------------------------------------------------------
+    # Python
+    # -------------------------------------------------------------------------
+    log_info "Installing Python..."
+    apt-get install -y \
+        python3 \
+        python3-pip \
+        python3-venv \
+        python3-dev
+
+    # Ensure pip is up to date
+    python3 -m pip install --upgrade pip
+
+    # -------------------------------------------------------------------------
+    # Node.js (LTS via NodeSource)
+    # -------------------------------------------------------------------------
+    log_info "Installing Node.js LTS..."
+    curl -fsSL https://deb.nodesource.com/setup_lts.x | bash -
+    apt-get install -y nodejs
+
+    # Install common global npm packages
+    npm install -g npm@latest
+    npm install -g yarn pnpm
+
+    log_info "Node.js $(node --version) installed"
+
+    # -------------------------------------------------------------------------
+    # Go
+    # -------------------------------------------------------------------------
+    log_info "Installing Go..."
+    GO_VERSION="${GO_VERSION:-1.22.0}"
+    cd /tmp
+    wget -q "https://go.dev/dl/go${GO_VERSION}.linux-amd64.tar.gz"
+    rm -rf /usr/local/go
+    tar -C /usr/local -xzf "go${GO_VERSION}.linux-amd64.tar.gz"
+    rm -f "go${GO_VERSION}.linux-amd64.tar.gz"
+
+    # Add Go to PATH for all users
+    cat > /etc/profile.d/go.sh << 'EOF'
+export PATH=$PATH:/usr/local/go/bin
+export GOPATH=$HOME/go
+export PATH=$PATH:$GOPATH/bin
+EOF
+
+    # Also add for the install user's bashrc
+    if ! grep -q "/usr/local/go/bin" "$USER_HOME/.bashrc" 2>/dev/null; then
+        echo 'export PATH=$PATH:/usr/local/go/bin' >> "$USER_HOME/.bashrc"
+        echo 'export GOPATH=$HOME/go' >> "$USER_HOME/.bashrc"
+        echo 'export PATH=$PATH:$GOPATH/bin' >> "$USER_HOME/.bashrc"
+    fi
+
+    log_info "Go $GO_VERSION installed"
+
+    # -------------------------------------------------------------------------
+    # .NET SDK
+    # -------------------------------------------------------------------------
+    log_info "Installing .NET SDK..."
+
+    # Add Microsoft repository
+    wget -q https://packages.microsoft.com/config/ubuntu/$(lsb_release -rs)/packages-microsoft-prod.deb -O /tmp/packages-microsoft-prod.deb
+    dpkg -i /tmp/packages-microsoft-prod.deb
+    rm -f /tmp/packages-microsoft-prod.deb
+
+    apt-get update
+    apt-get install -y dotnet-sdk-8.0
+
+    log_info ".NET SDK $(dotnet --version) installed"
+
+    # -------------------------------------------------------------------------
+    # Rust
+    # -------------------------------------------------------------------------
+    log_info "Installing Rust..."
+    if ! command -v rustc &> /dev/null; then
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        source "$HOME/.cargo/env" 2>/dev/null || true
+
+        # Add to user's bashrc
+        if ! grep -q ".cargo/env" "$USER_HOME/.bashrc" 2>/dev/null; then
+            echo 'source "$HOME/.cargo/env"' >> "$USER_HOME/.bashrc"
+        fi
+        log_info "Rust installed"
+    else
+        log_info "Rust already installed"
+    fi
+
+    # -------------------------------------------------------------------------
+    # Java (OpenJDK)
+    # -------------------------------------------------------------------------
+    log_info "Installing Java (OpenJDK)..."
+    apt-get install -y openjdk-21-jdk openjdk-21-source
+
+    # Set JAVA_HOME
+    cat > /etc/profile.d/java.sh << 'EOF'
+export JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64
+export PATH=$PATH:$JAVA_HOME/bin
+EOF
+    log_info "Java $(java --version 2>&1 | head -1) installed"
+
+    # -------------------------------------------------------------------------
+    # Modern CLI Tools (Rust-based replacements)
+    # -------------------------------------------------------------------------
+    log_info "Installing modern CLI tools..."
+    apt-get install -y \
+        ripgrep \
+        fd-find \
+        bat \
+        fzf \
+        zoxide \
+        hyperfine \
+        tokei
+
+    # Create symlinks for common names
+    ln -sf /usr/bin/batcat /usr/local/bin/bat 2>/dev/null || true
+    ln -sf /usr/bin/fdfind /usr/local/bin/fd 2>/dev/null || true
+
+    # Install eza (modern ls replacement) - newer than exa
+    if ! command -v eza &> /dev/null; then
+        apt-get install -y gpg
+        mkdir -p /etc/apt/keyrings
+        wget -qO- https://raw.githubusercontent.com/eza-community/eza/main/deb.asc | gpg --dearmor -o /etc/apt/keyrings/gierens.gpg
+        echo "deb [signed-by=/etc/apt/keyrings/gierens.gpg] http://deb.gierens.de stable main" > /etc/apt/sources.list.d/gierens.list
+        apt-get update
+        apt-get install -y eza || log_warn "eza installation failed"
+    fi
+
+    # Install delta (better git diff)
+    if ! command -v delta &> /dev/null; then
+        DELTA_VERSION="0.16.5"
+        wget -q "https://github.com/dandavison/delta/releases/download/${DELTA_VERSION}/git-delta_${DELTA_VERSION}_amd64.deb" -O /tmp/delta.deb
+        dpkg -i /tmp/delta.deb || apt-get install -f -y
+        rm -f /tmp/delta.deb
+    fi
+
+    # -------------------------------------------------------------------------
+    # Shell Enhancements
+    # -------------------------------------------------------------------------
+    log_info "Installing shell enhancements..."
+    apt-get install -y zsh
+
+    # Install Starship prompt
+    if ! command -v starship &> /dev/null; then
+        curl -sS https://starship.rs/install.sh | sh -s -- -y
+    fi
+
+    # Add starship to bashrc if not present
+    if ! grep -q "starship init bash" "$USER_HOME/.bashrc" 2>/dev/null; then
+        echo 'eval "$(starship init bash)"' >> "$USER_HOME/.bashrc"
+    fi
+
+    # Install direnv
+    apt-get install -y direnv
+    if ! grep -q "direnv hook bash" "$USER_HOME/.bashrc" 2>/dev/null; then
+        echo 'eval "$(direnv hook bash)"' >> "$USER_HOME/.bashrc"
+    fi
+
+    # -------------------------------------------------------------------------
+    # Git Tools
+    # -------------------------------------------------------------------------
+    log_info "Installing Git tools..."
+
+    # GitHub CLI
+    if ! command -v gh &> /dev/null; then
+        curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | dd of=/usr/share/keyrings/githubcli-archive-keyring.gpg
+        chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg
+        echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" > /etc/apt/sources.list.d/github-cli.list
+        apt-get update
+        apt-get install -y gh
+    fi
+
+    # Lazygit (TUI for git)
+    if ! command -v lazygit &> /dev/null; then
+        LAZYGIT_VERSION=$(curl -s "https://api.github.com/repos/jesseduffield/lazygit/releases/latest" | grep -Po '"tag_name": "v\K[^"]*')
+        curl -Lo /tmp/lazygit.tar.gz "https://github.com/jesseduffield/lazygit/releases/latest/download/lazygit_${LAZYGIT_VERSION}_Linux_x86_64.tar.gz"
+        tar xf /tmp/lazygit.tar.gz -C /usr/local/bin lazygit
+        rm -f /tmp/lazygit.tar.gz
+    fi
+
+    # Configure git to use delta
+    git config --system core.pager "delta"
+    git config --system interactive.diffFilter "delta --color-only"
+    git config --system delta.navigate true
+    git config --system delta.light false
+    git config --system merge.conflictstyle diff3
+    git config --system diff.colorMoved default
+
+    # -------------------------------------------------------------------------
+    # Kubernetes Tools
+    # -------------------------------------------------------------------------
+    log_info "Installing Kubernetes tools..."
+
+    # kubectl
+    if ! command -v kubectl &> /dev/null; then
+        curl -fsSL https://pkgs.k8s.io/core:/stable:/v1.29/deb/Release.key | gpg --dearmor -o /etc/apt/keyrings/kubernetes-apt-keyring.gpg
+        echo 'deb [signed-by=/etc/apt/keyrings/kubernetes-apt-keyring.gpg] https://pkgs.k8s.io/core:/stable:/v1.29/deb/ /' > /etc/apt/sources.list.d/kubernetes.list
+        apt-get update
+        apt-get install -y kubectl
+    fi
+
+    # Helm
+    if ! command -v helm &> /dev/null; then
+        curl https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+    fi
+
+    # k9s (TUI for Kubernetes)
+    if ! command -v k9s &> /dev/null; then
+        K9S_VERSION=$(curl -s "https://api.github.com/repos/derailed/k9s/releases/latest" | grep -Po '"tag_name": "\K[^"]*')
+        curl -Lo /tmp/k9s.tar.gz "https://github.com/derailed/k9s/releases/download/${K9S_VERSION}/k9s_Linux_amd64.tar.gz"
+        tar xf /tmp/k9s.tar.gz -C /usr/local/bin k9s
+        rm -f /tmp/k9s.tar.gz
+    fi
+
+    # kubectx and kubens
+    if ! command -v kubectx &> /dev/null; then
+        git clone https://github.com/ahmetb/kubectx /opt/kubectx
+        ln -sf /opt/kubectx/kubectx /usr/local/bin/kubectx
+        ln -sf /opt/kubectx/kubens /usr/local/bin/kubens
+    fi
+
+    # -------------------------------------------------------------------------
+    # Cloud CLIs
+    # -------------------------------------------------------------------------
+    log_info "Installing Cloud CLIs..."
+
+    # AWS CLI v2
+    if ! command -v aws &> /dev/null; then
+        cd /tmp
+        curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+        unzip -q awscliv2.zip
+        ./aws/install
+        rm -rf aws awscliv2.zip
+    fi
+
+    # Azure CLI
+    if ! command -v az &> /dev/null; then
+        curl -sL https://aka.ms/InstallAzureCLIDeb | bash
+    fi
+
+    # Google Cloud SDK
+    if ! command -v gcloud &> /dev/null; then
+        echo "deb [signed-by=/usr/share/keyrings/cloud.google.gpg] https://packages.cloud.google.com/apt cloud-sdk main" > /etc/apt/sources.list.d/google-cloud-sdk.list
+        curl https://packages.cloud.google.com/apt/doc/apt-key.gpg | gpg --dearmor -o /usr/share/keyrings/cloud.google.gpg
+        apt-get update
+        apt-get install -y google-cloud-cli
+    fi
+
+    # -------------------------------------------------------------------------
+    # Infrastructure as Code
+    # -------------------------------------------------------------------------
+    log_info "Installing IaC tools..."
+
+    # Terraform
+    if ! command -v terraform &> /dev/null; then
+        wget -O- https://apt.releases.hashicorp.com/gpg | gpg --dearmor -o /usr/share/keyrings/hashicorp-archive-keyring.gpg
+        echo "deb [signed-by=/usr/share/keyrings/hashicorp-archive-keyring.gpg] https://apt.releases.hashicorp.com $(lsb_release -cs) main" > /etc/apt/sources.list.d/hashicorp.list
+        apt-get update
+        apt-get install -y terraform
+    fi
+
+    # Pulumi
+    if ! command -v pulumi &> /dev/null; then
+        curl -fsSL https://get.pulumi.com | sh
+        ln -sf "$HOME/.pulumi/bin/pulumi" /usr/local/bin/pulumi 2>/dev/null || true
+    fi
+
+    # -------------------------------------------------------------------------
+    # Database Clients
+    # -------------------------------------------------------------------------
+    log_info "Installing database clients..."
+    apt-get install -y \
+        postgresql-client \
+        mysql-client \
+        redis-tools \
+        sqlite3
+
+    # MongoDB shell (mongosh)
+    if ! command -v mongosh &> /dev/null; then
+        wget -qO- https://www.mongodb.org/static/pgp/server-7.0.asc | gpg --dearmor -o /usr/share/keyrings/mongodb-server-7.0.gpg
+        echo "deb [ signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu $(lsb_release -cs)/mongodb-org/7.0 multiverse" > /etc/apt/sources.list.d/mongodb-org-7.0.list
+        apt-get update
+        apt-get install -y mongodb-mongosh || log_warn "mongosh installation failed"
+    fi
+
+    # -------------------------------------------------------------------------
+    # HTTP/API Tools
+    # -------------------------------------------------------------------------
+    log_info "Installing HTTP/API tools..."
+    apt-get install -y httpie
+
+    # Install xh (modern HTTPie alternative written in Rust)
+    if ! command -v xh &> /dev/null; then
+        cargo install xh 2>/dev/null || log_warn "xh installation failed (requires Rust)"
+    fi
+
+    # grpcurl
+    if ! command -v grpcurl &> /dev/null; then
+        GRPCURL_VERSION=$(curl -s "https://api.github.com/repos/fullstorydev/grpcurl/releases/latest" | grep -Po '"tag_name": "v\K[^"]*')
+        curl -Lo /tmp/grpcurl.tar.gz "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz"
+        tar xf /tmp/grpcurl.tar.gz -C /usr/local/bin grpcurl
+        rm -f /tmp/grpcurl.tar.gz
+    fi
+
+    # -------------------------------------------------------------------------
+    # Build & Task Tools
+    # -------------------------------------------------------------------------
+    log_info "Installing build tools..."
+    apt-get install -y \
+        cmake \
+        ninja-build \
+        meson \
+        autoconf \
+        automake \
+        libtool \
+        pkg-config
+
+    # Just (command runner like make but better)
+    if ! command -v just &> /dev/null; then
+        cargo install just 2>/dev/null || log_warn "just installation failed (requires Rust)"
+    fi
+
+    # Task (Taskfile runner)
+    if ! command -v task &> /dev/null; then
+        sh -c "$(curl --location https://taskfile.dev/install.sh)" -- -d -b /usr/local/bin
+    fi
+
+    # -------------------------------------------------------------------------
+    # Editors
+    # -------------------------------------------------------------------------
+    log_info "Installing editors..."
+    apt-get install -y \
+        vim \
+        neovim
+
+    # -------------------------------------------------------------------------
+    # AI CLI Tools
+    # -------------------------------------------------------------------------
+    log_info "Installing AI CLI Tools..."
+
+    # Claude Code CLI (Anthropic)
+    log_info "Installing Claude Code CLI..."
+    npm install -g @anthropic-ai/claude-code || log_warn "Claude Code CLI installation failed"
+
+    # Gemini CLI (Google)
+    log_info "Installing Gemini CLI..."
+    npm install -g @google/gemini-cli 2>/dev/null || \
+    npm install -g gemini-cli 2>/dev/null || \
+    log_warn "Gemini CLI not found in npm, may need manual installation"
+
+    # Continue.dev CLI
+    log_info "Installing Continue.dev CLI..."
+    npm install -g continue-cli 2>/dev/null || \
+    log_warn "Continue CLI not found in npm, may need manual installation"
+
+    # Aider (AI pair programming)
+    log_info "Installing Aider..."
+    python3 -m pip install aider-chat || log_warn "Aider installation failed"
+
+    # OpenAI CLI
+    log_info "Installing OpenAI CLI..."
+    python3 -m pip install openai || log_warn "OpenAI CLI installation failed"
+
+    # -------------------------------------------------------------------------
+    # Misc Dev Tools
+    # -------------------------------------------------------------------------
+    log_info "Installing misc dev tools..."
+    apt-get install -y \
+        shellcheck \
+        shfmt \
+        pre-commit \
+        entr \
+        watchman \
+        socat \
+        websocat 2>/dev/null || true
+
+    # yq (YAML processor - Go version)
+    if ! command -v yq &> /dev/null || ! yq --version 2>&1 | grep -q "mikefarah"; then
+        YQ_VERSION=$(curl -s "https://api.github.com/repos/mikefarah/yq/releases/latest" | grep -Po '"tag_name": "v\K[^"]*')
+        wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64"
+        chmod +x /usr/local/bin/yq
+    fi
+
+    # glow (markdown renderer)
+    if ! command -v glow &> /dev/null; then
+        GLOW_VERSION=$(curl -s "https://api.github.com/repos/charmbracelet/glow/releases/latest" | grep -Po '"tag_name": "v\K[^"]*')
+        wget -qO /tmp/glow.deb "https://github.com/charmbracelet/glow/releases/download/v${GLOW_VERSION}/glow_${GLOW_VERSION}_amd64.deb"
+        dpkg -i /tmp/glow.deb || apt-get install -f -y
+        rm -f /tmp/glow.deb
+    fi
+
+    # -------------------------------------------------------------------------
+    # Summary
+    # -------------------------------------------------------------------------
+    log_info "Development tools installation complete!"
+    log_info ""
+    log_info "Languages installed:"
+    log_info "  - Python $(python3 --version 2>&1 | awk '{print $2}')"
+    log_info "  - Node.js $(node --version 2>/dev/null)"
+    log_info "  - Go $(/usr/local/go/bin/go version 2>/dev/null | awk '{print $3}' | sed 's/go//')"
+    log_info "  - .NET SDK $(dotnet --version 2>/dev/null)"
+    log_info "  - Rust $(rustc --version 2>/dev/null | awk '{print $2}')"
+    log_info "  - Java $(java --version 2>&1 | head -1 | awk '{print $2}')"
+    log_info ""
+    log_info "CLI tools installed:"
+    log_info "  - Modern shell tools: ripgrep, fd, bat, eza, fzf, zoxide, delta"
+    log_info "  - Git: gh, lazygit"
+    log_info "  - Kubernetes: kubectl, helm, k9s, kubectx/kubens"
+    log_info "  - Cloud: aws, az, gcloud"
+    log_info "  - IaC: terraform, pulumi"
+    log_info "  - Database: psql, mysql, redis-cli, mongosh, sqlite3"
+    log_info "  - HTTP: httpie, grpcurl"
+    log_info "  - AI: claude, aider, openai"
+    log_info "  - Build: cmake, ninja, just, task"
+    log_info "  - Shell: starship, direnv, zsh"
+    log_info ""
+    log_info "Note: Log out and back in for PATH changes to take effect"
 }
 
 # ============================================================================
@@ -985,9 +1429,13 @@ show_menu() {
     echo " 18. Ansible (Automation)"
     echo " 19. Configure Swap"
     echo " 20. Wake-on-LAN"
-    echo " 21. Common Tools (btop, ncdu, etc.)"
+    echo " 21. Common Tools (btop, ncdu, tmux, etc.)"
     echo ""
-    echo " 22. Install ALL recommended for home lab"
+    echo -e "${YELLOW}Development:${NC}"
+    echo " 22. Dev Tools (Go, Python, Node.js, .NET, AI CLIs)"
+    echo ""
+    echo " 23. Install ALL recommended for home lab"
+    echo " 24. Install ALL recommended for dev workstation"
     echo "  0. Exit"
     echo ""
 }
@@ -1021,7 +1469,9 @@ interactive_menu() {
             19) CONFIGURE_SWAP=true; configure_swap ;;
             20) ENABLE_WAKE_ON_LAN=true; configure_wakeonlan ;;
             21) INSTALL_COMMON_TOOLS=true; install_common_tools ;;
-            22) install_recommended_homelab ;;
+            22) INSTALL_DEV_TOOLS=true; install_dev_tools ;;
+            23) install_recommended_homelab ;;
+            24) install_recommended_dev_workstation ;;
             0)
                 echo "Exiting..."
                 exit 0
@@ -1069,6 +1519,50 @@ install_recommended_homelab() {
     log_info "Recommended home lab stack installed!"
 }
 
+install_recommended_dev_workstation() {
+    log_section "Installing Recommended Dev Workstation Stack"
+
+    # Include home lab essentials
+    INSTALL_DOCKER=true
+    INSTALL_PORTAINER=true
+    INSTALL_COCKPIT=true
+    INSTALL_FAIL2BAN=true
+    ENABLE_AUTO_UPDATES=true
+    HARDEN_SSH=true
+    CONFIGURE_SWAP=true
+    INSTALL_COMMON_TOOLS=true
+    CONFIGURE_NTP=true
+    INSTALL_ANSIBLE=true
+
+    # Dev-specific
+    INSTALL_DEV_TOOLS=true
+
+    install_docker
+    install_portainer
+    install_cockpit
+    install_fail2ban
+    configure_unattended_upgrades
+    harden_ssh
+    configure_swap
+    configure_ntp
+    install_ansible
+    install_common_tools
+    install_dev_tools
+
+    log_info "Recommended dev workstation stack installed!"
+    log_info ""
+    log_info "Installed languages & tools:"
+    log_info "  - Python 3 with pip and venv"
+    log_info "  - Node.js LTS with npm, yarn, pnpm"
+    log_info "  - Go"
+    log_info "  - .NET SDK 8.0"
+    log_info "  - Claude Code CLI"
+    log_info "  - Gemini CLI"
+    log_info "  - Continue.dev CLI"
+    log_info ""
+    log_info "Note: Log out and back in for PATH changes to take effect"
+}
+
 # ============================================================================
 # MAIN
 # ============================================================================
@@ -1112,6 +1606,7 @@ main() {
     configure_wakeonlan
     configure_ntp
     install_common_tools
+    install_dev_tools
 
     log_info "Optional features installation complete!"
 }

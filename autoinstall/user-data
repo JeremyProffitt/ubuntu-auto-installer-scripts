@@ -2,9 +2,13 @@
 autoinstall:
   version: 1
 
-  # Interactive mode - ask for target disk
-  interactive-sections:
-    - storage
+  # Fully automated - use largest available disk
+  # The installer will show a single confirmation before proceeding
+  storage:
+    layout:
+      name: lvm
+      match:
+        size: largest
 
   # Locale and keyboard
   locale: ${LOCALE:-en_US.UTF-8}

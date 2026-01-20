@@ -27,34 +27,44 @@ if %errorlevel% neq 0 (
 cd /d "%~dp0"
 
 :: Load configuration from .env file
-if exist ".env" (
-    echo Loading configuration from .env file...
-    for /f "usebackq tokens=1,* delims==" %%a in (".env") do (
-        set "line=%%a"
-        if not "!line:~0,1!"=="#" (
-            if not "%%a"=="" (
-                set "%%a=%%b"
-            )
+if not exist ".env" (
+    echo ERROR: .env file not found.
+    echo Please copy .env.sample to .env and configure it with your username and password.
+    pause
+    exit /b 1
+)
+
+echo Loading configuration from .env file...
+for /f "usebackq tokens=1,* delims==" %%a in (".env") do (
+    set "line=%%a"
+    if not "!line:~0,1!"=="#" (
+        if not "%%a"=="" (
+            set "%%a=%%b"
         )
     )
-) else (
-    echo WARNING: .env file not found. Using defaults.
-    echo Please copy .env.sample to .env and configure it.
-    set INSTALL_USERNAME=admin
-    set INSTALL_PASSWORD=changeme123
-    set INSTALL_HOSTNAME=ubuntu-server
-    set TIMEZONE=America/New_York
-    set LOCALE=en_US.UTF-8
-    set KEYBOARD_LAYOUT=us
-    set INSTALL_GUI=false
-    set SSH_AUTHORIZED_KEYS=
-    set STATIC_IP=false
-    set IP_ADDRESS=192.168.1.100
-    set NETMASK=255.255.255.0
-    set GATEWAY=192.168.1.1
-    set DNS_SERVERS=8.8.8.8,8.8.4.4
-    set EXTRA_PACKAGES=htop,vim,curl,wget,git
-    set AUTO_MOUNT_DRIVES=true
+)
+
+:: Validate required fields
+if "%INSTALL_USERNAME%"=="" (
+    echo ERROR: INSTALL_USERNAME is not set in .env file.
+    echo Please configure INSTALL_USERNAME in your .env file.
+    pause
+    exit /b 1
+)
+
+if "%INSTALL_PASSWORD%"=="" (
+    echo ERROR: INSTALL_PASSWORD is not set in .env file.
+    echo Please configure INSTALL_PASSWORD in your .env file.
+    pause
+    exit /b 1
+)
+
+:: Generate random hostname if set to "random" or empty
+if "%INSTALL_HOSTNAME%"=="random" (
+    for /f "tokens=*" %%h in ('powershell -Command "[System.Guid]::NewGuid().ToString().Substring(0,6)"') do set INSTALL_HOSTNAME=ubuntu-%%h
+)
+if "%INSTALL_HOSTNAME%"=="" (
+    for /f "tokens=*" %%h in ('powershell -Command "[System.Guid]::NewGuid().ToString().Substring(0,6)"') do set INSTALL_HOSTNAME=ubuntu-%%h
 )
 
 echo.
@@ -134,8 +144,8 @@ echo Scanning for USB drives...
 echo ============================================================
 echo.
 
-:: List available USB drives using PowerShell
-powershell -Command "Get-Disk | Where-Object { $_.BusType -eq 'USB' -or ($_.Size -lt 256GB -and $_.BusType -ne 'NVMe' -and $_.OperationalStatus -eq 'Online') } | Format-Table Number, FriendlyName, @{L='Size(GB)';E={[math]::Round($_.Size/1GB,2)}}, BusType -AutoSize"
+:: List available USB drives using PowerShell (with drive letters)
+powershell -Command "Get-Disk | Where-Object { $_.BusType -eq 'USB' -or ($_.Size -lt 256GB -and $_.BusType -ne 'NVMe' -and $_.OperationalStatus -eq 'Online') } | ForEach-Object { $disk = $_; $letters = (Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue | Get-Volume -ErrorAction SilentlyContinue | Where-Object DriveLetter | ForEach-Object { $_.DriveLetter + ':' }) -join ','; [PSCustomObject]@{ Number = $disk.Number; Letters = if($letters){$letters}else{'(none)'}; FriendlyName = $disk.FriendlyName; 'Size(GB)' = [math]::Round($disk.Size/1GB,2); BusType = $disk.BusType } } | Format-Table Number, Letters, FriendlyName, 'Size(GB)', BusType -AutoSize"
 
 echo.
 echo WARNING: All data on the selected drive will be ERASED!
@@ -171,16 +181,16 @@ echo ============================================================
 echo.
 echo Step 1/5: Cleaning disk...
 
-:: Create diskpart script
+:: Create diskpart script - use MBR with single FAT32 partition for USB compatibility
+:: Note: GPT EFI partitions are not supported on removable media in Windows
 (
     echo select disk %DISK_NUMBER%
     echo clean
-    echo convert gpt
-    echo create partition efi size=512
-    echo format quick fs=fat32 label="ESP"
-    echo assign letter=S
+    echo convert mbr
     echo create partition primary
-    echo format quick fs=ntfs label="Ubuntu"
+    echo select partition 1
+    echo active
+    echo format quick fs=fat32 label="UBUNTU"
     echo assign letter=U
     echo exit
 ) > "%TEMP%\diskpart_script.txt"
@@ -199,8 +209,11 @@ del "%TEMP%\diskpart_script.txt"
 echo.
 echo Step 2/5: Mounting ISO and extracting contents...
 
+:: Convert relative ISO path to absolute (Mount-DiskImage requires absolute path)
+for %%i in ("%ISO_PATH%") do set ISO_FULLPATH=%%~fi
+
 :: Mount the ISO
-for /f "tokens=*" %%i in ('powershell -Command "(Mount-DiskImage -ImagePath '%ISO_PATH%' -PassThru | Get-Volume).DriveLetter"') do set ISO_DRIVE=%%i
+for /f "tokens=*" %%i in ('powershell -Command "(Mount-DiskImage -ImagePath '!ISO_FULLPATH!' -PassThru | Get-Volume).DriveLetter"') do set ISO_DRIVE=%%i
 
 if "%ISO_DRIVE%"=="" (
     echo ERROR: Failed to mount ISO.
@@ -214,21 +227,11 @@ echo ISO mounted on drive %ISO_DRIVE%:
 echo.
 echo Step 3/5: Copying ISO contents to USB (this may take several minutes)...
 
-:: Copy to USB data partition
+:: Copy all ISO contents to USB (single partition handles both UEFI and legacy boot)
 robocopy %ISO_DRIVE%:\ U:\ /E /NFL /NDL /NJH /NJS /R:3 /W:5
 
-:: Copy EFI boot files to ESP
-if exist "%ISO_DRIVE%:\EFI" (
-    robocopy %ISO_DRIVE%:\EFI S:\EFI /E /NFL /NDL /NJH /NJS /R:3 /W:5
-)
-
-:: Copy boot folder to ESP
-if exist "%ISO_DRIVE%:\boot" (
-    robocopy %ISO_DRIVE%:\boot S:\boot /E /NFL /NDL /NJH /NJS /R:3 /W:5
-)
-
 :: Unmount ISO
-powershell -Command "Dismount-DiskImage -ImagePath '%ISO_PATH%'"
+powershell -Command "Dismount-DiskImage -ImagePath '!ISO_FULLPATH!'"
 
 :: Step 4: Create autoinstall configuration
 echo.
@@ -239,13 +242,16 @@ if not exist "U:\autoinstall" mkdir "U:\autoinstall"
 :: Generate password hash using PowerShell
 for /f "tokens=*" %%h in ('powershell -Command "$password = '%INSTALL_PASSWORD%'; $bytes = [System.Text.Encoding]::UTF8.GetBytes($password); $sha512 = [System.Security.Cryptography.SHA512]::Create(); $hash = $sha512.ComputeHash($bytes); '$6$rounds=4096$randomsalt$' + [Convert]::ToBase64String($hash)"') do set PASSWORD_HASH=%%h
 
-:: Create user-data file
+:: Create user-data file (fully automated - uses largest disk)
 (
     echo #cloud-config
     echo autoinstall:
     echo   version: 1
-    echo   interactive-sections:
-    echo     - storage
+    echo   storage:
+    echo     layout:
+    echo       name: lvm
+    echo       match:
+    echo         size: largest
     echo   locale: %LOCALE%
     echo   keyboard:
     echo     layout: %KEYBOARD_LAYOUT%
@@ -347,13 +353,17 @@ if exist "scripts\install-gui.sh" copy "scripts\install-gui.sh" "U:\scripts\" >n
     echo AUTO_MOUNT_DRIVES=%AUTO_MOUNT_DRIVES%
 ) > "U:\scripts\config.env"
 
-:: Modify grub.cfg to add autoinstall
-echo Configuring boot loader...
+:: Modify grub.cfg to add autoinstall and set timeout for automatic boot
+echo Configuring boot loader for automatic installation...
 if exist "U:\boot\grub\grub.cfg" (
+    attrib -r "U:\boot\grub\grub.cfg"
     powershell -Command "(Get-Content 'U:\boot\grub\grub.cfg') -replace '(linux\s+[^\r\n]+)', '$1 autoinstall ds=nocloud;s=/cdrom/autoinstall/' | Set-Content 'U:\boot\grub\grub.cfg'"
+    powershell -Command "(Get-Content 'U:\boot\grub\grub.cfg') -replace 'set timeout=\d+', 'set timeout=5' | Set-Content 'U:\boot\grub\grub.cfg'"
 )
-if exist "S:\boot\grub\grub.cfg" (
-    powershell -Command "(Get-Content 'S:\boot\grub\grub.cfg') -replace '(linux\s+[^\r\n]+)', '$1 autoinstall ds=nocloud;s=/cdrom/autoinstall/' | Set-Content 'S:\boot\grub\grub.cfg'"
+
+:: Create a custom grub.cfg that auto-selects the install option
+if exist "U:\boot\grub\grub.cfg" (
+    powershell -Command "$content = Get-Content 'U:\boot\grub\grub.cfg' -Raw; if ($content -notmatch 'set timeout_style') { $content = $content -replace '(set timeout=\d+)', \"`$1`nset timeout_style=countdown\" }; Set-Content 'U:\boot\grub\grub.cfg' $content"
 )
 
 echo.

@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -37,6 +38,7 @@ type DriveInfo struct {
 	Size        uint64
 	SizeDisplay string
 	Model       string
+	Letters     string
 	IsRemovable bool
 }
 
@@ -143,7 +145,7 @@ func main() {
 	fmt.Println("\n💾 Available USB Drives:")
 	fmt.Println("   ────────────────────────────────────────────────────────────")
 	for _, d := range drives {
-		fmt.Printf("   [%d] %s - %s (%s)\n", d.Number, d.Model, d.SizeDisplay, d.DeviceID)
+		fmt.Printf("   [%d] %s - %s - %s (%s)\n", d.Number, d.Letters, d.Model, d.SizeDisplay, d.MediaType)
 	}
 	fmt.Println("   ────────────────────────────────────────────────────────────")
 
@@ -218,6 +220,12 @@ func isAdmin() bool {
 	return err == nil
 }
 
+func generateRandomHostname() string {
+	b := make([]byte, 3)
+	rand.Read(b)
+	return fmt.Sprintf("ubuntu-%x", b)
+}
+
 func loadConfig() (*Config, error) {
 	// Try to load .env file
 	envFile := ".env"
@@ -225,7 +233,7 @@ func loadConfig() (*Config, error) {
 		// Try parent directory
 		envFile = filepath.Join("..", "..", ".env")
 		if _, err := os.Stat(envFile); os.IsNotExist(err) {
-			return nil, fmt.Errorf(".env file not found")
+			return nil, fmt.Errorf(".env file not found. Please copy .env.sample to .env and configure it")
 		}
 	}
 
@@ -234,10 +242,27 @@ func loadConfig() (*Config, error) {
 		return nil, err
 	}
 
+	// Validate required fields
+	username := env["INSTALL_USERNAME"]
+	if username == "" {
+		return nil, fmt.Errorf("INSTALL_USERNAME is not set in .env file")
+	}
+
+	password := env["INSTALL_PASSWORD"]
+	if password == "" {
+		return nil, fmt.Errorf("INSTALL_PASSWORD is not set in .env file")
+	}
+
+	// Generate random hostname if set to "random" or empty
+	hostname := getEnvOrDefault(env, "INSTALL_HOSTNAME", "random")
+	if hostname == "random" || hostname == "" {
+		hostname = generateRandomHostname()
+	}
+
 	config := &Config{
-		Username:         getEnvOrDefault(env, "INSTALL_USERNAME", "admin"),
-		Password:         getEnvOrDefault(env, "INSTALL_PASSWORD", "changeme123"),
-		Hostname:         getEnvOrDefault(env, "INSTALL_HOSTNAME", "ubuntu-server"),
+		Username:         username,
+		Password:         password,
+		Hostname:         hostname,
 		Timezone:         getEnvOrDefault(env, "TIMEZONE", "America/New_York"),
 		Locale:           getEnvOrDefault(env, "LOCALE", "en_US.UTF-8"),
 		KeyboardLayout:   getEnvOrDefault(env, "KEYBOARD_LAYOUT", "us"),
@@ -289,13 +314,15 @@ func getEnvOrDefault(env map[string]string, key, defaultValue string) string {
 }
 
 func listUSBDrives() ([]DriveInfo, error) {
-	// Use PowerShell to get disk information
+	// Use PowerShell to get disk information with drive letters
 	cmd := exec.Command("powershell", "-Command", `
 		Get-Disk | Where-Object { $_.BusType -eq 'USB' -or ($_.Size -lt 256GB -and $_.BusType -ne 'NVMe' -and $_.OperationalStatus -eq 'Online') } |
-		Select-Object Number, FriendlyName, Size, BusType |
 		ForEach-Object {
-			$size = [math]::Round($_.Size / 1GB, 2)
-			"$($_.Number)|$($_.FriendlyName)|$($size)GB|$($_.BusType)"
+			$disk = $_
+			$letters = (Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue | Get-Volume -ErrorAction SilentlyContinue | Where-Object DriveLetter | ForEach-Object { $_.DriveLetter + ':' }) -join ','
+			if (-not $letters) { $letters = '(none)' }
+			$size = [math]::Round($disk.Size / 1GB, 2)
+			"$($disk.Number)|$($letters)|$($disk.FriendlyName)|$($size)GB|$($disk.BusType)"
 		}
 	`)
 
@@ -312,15 +339,16 @@ func listUSBDrives() ([]DriveInfo, error) {
 			continue
 		}
 		parts := strings.Split(line, "|")
-		if len(parts) >= 4 {
+		if len(parts) >= 5 {
 			num, _ := strconv.Atoi(parts[0])
 			drives = append(drives, DriveInfo{
 				Number:      num,
-				Model:       parts[1],
-				SizeDisplay: parts[2],
-				MediaType:   parts[3],
+				Letters:     parts[1],
+				Model:       parts[2],
+				SizeDisplay: parts[3],
+				MediaType:   parts[4],
 				DeviceID:    fmt.Sprintf("\\\\.\\PhysicalDrive%d", num),
-				IsRemovable: parts[3] == "USB",
+				IsRemovable: parts[4] == "USB",
 			})
 		}
 	}
@@ -573,8 +601,11 @@ func generateUserData(config *Config, passwordHash string) string {
 	userData := fmt.Sprintf(`#cloud-config
 autoinstall:
   version: 1
-  interactive-sections:
-    - storage
+  storage:
+    layout:
+      name: lvm
+      match:
+        size: largest
   locale: %s
   keyboard:
     layout: %s
@@ -706,10 +737,9 @@ func modifyGrubConfig(grubPath string) error {
 		return nil // File might not exist
 	}
 
-	// Add autoinstall parameter to linux boot line
 	modified := string(content)
 
-	// Look for menuentry and add autoinstall parameter
+	// Add autoinstall parameter to linux boot line
 	re := regexp.MustCompile(`(linux\s+[^\n]+)`)
 	modified = re.ReplaceAllStringFunc(modified, func(match string) string {
 		if !strings.Contains(match, "autoinstall") {
@@ -717,6 +747,17 @@ func modifyGrubConfig(grubPath string) error {
 		}
 		return match
 	})
+
+	// Set timeout to 5 seconds for automatic boot
+	timeoutRe := regexp.MustCompile(`set timeout=\d+`)
+	if timeoutRe.MatchString(modified) {
+		modified = timeoutRe.ReplaceAllString(modified, "set timeout=5")
+	}
+
+	// Add timeout_style for countdown display
+	if !strings.Contains(modified, "timeout_style") {
+		modified = strings.Replace(modified, "set timeout=5", "set timeout=5\nset timeout_style=countdown", 1)
+	}
 
 	return os.WriteFile(grubPath, []byte(modified), 0644)
 }
