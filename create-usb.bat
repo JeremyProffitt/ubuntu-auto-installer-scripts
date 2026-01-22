@@ -242,86 +242,30 @@ if not exist "U:\autoinstall" mkdir "U:\autoinstall"
 :: Generate password hash using PowerShell
 for /f "tokens=*" %%h in ('powershell -Command "$password = '%INSTALL_PASSWORD%'; $bytes = [System.Text.Encoding]::UTF8.GetBytes($password); $sha512 = [System.Security.Cryptography.SHA512]::Create(); $hash = $sha512.ComputeHash($bytes); '$6$rounds=4096$randomsalt$' + [Convert]::ToBase64String($hash)"') do set PASSWORD_HASH=%%h
 
-:: Create user-data file (fully automated - uses largest disk)
-(
-    echo #cloud-config
-    echo autoinstall:
-    echo   version: 1
-    echo   storage:
-    echo     layout:
-    echo       name: lvm
-    echo       match:
-    echo         size: largest
-    echo   locale: %LOCALE%
-    echo   keyboard:
-    echo     layout: %KEYBOARD_LAYOUT%
-    echo   identity:
-    echo     hostname: %INSTALL_HOSTNAME%
-    echo     username: %INSTALL_USERNAME%
-    echo     password: "%PASSWORD_HASH%"
-    echo   ssh:
-    echo     install-server: true
-    echo     allow-pw: true
-    echo     authorized-keys: []
-    echo   network:
-    echo     version: 2
-    echo     ethernets:
-    echo       id0:
-    echo         match:
-    echo           driver: "*"
-    echo         dhcp4: true
-    echo         dhcp6: true
-    echo   timezone: %TIMEZONE%
-    echo   apt:
-    echo     primary:
-    echo       - arches: [default]
-    echo         uri: http://archive.ubuntu.com/ubuntu
-    echo     geoip: true
-    echo   packages:
-    echo     - linux-firmware
-    echo     - intel-microcode
-    echo     - amd64-microcode
-    echo     - build-essential
-    echo     - dkms
-    echo     - linux-headers-generic
-    echo     - network-manager
-    echo     - wpasupplicant
-    echo     - ethtool
-    echo     - net-tools
-    echo     - nvme-cli
-    echo     - smartmontools
-    echo     - hdparm
-    echo     - mdadm
-    echo     - lvm2
-    echo     - openssh-server
-    echo     - curl
-    echo     - wget
-    echo     - git
-    echo     - htop
-    echo     - vim
-    echo     - tmux
-    echo     - unzip
-    echo     - lm-sensors
-    echo     - i2c-tools
-    echo     - thermald
-    echo     - powertop
-    echo     - alsa-utils
-    echo     - alsa-base
-    echo     - usbutils
-    echo     - pciutils
-    echo     - fwupd
-    echo   late-commands:
-    echo     - cp -r /cdrom/scripts /target/opt/ubuntu-installer-scripts 2^>/dev/null ^|^| true
-    echo     - chmod +x /target/opt/ubuntu-installer-scripts/*.sh 2^>/dev/null ^|^| true
-    echo     - curtin in-target --target=/target -- systemctl enable ssh
-    echo     - curtin in-target --target=/target -- update-initramfs -u -k all
-) > "U:\autoinstall\user-data"
+:: Create user-data file by copying template and substituting variables
+:: Copy the template from autoinstall directory
+if exist "autoinstall\user-data" (
+    copy "autoinstall\user-data" "U:\autoinstall\user-data" >nul
+
+    :: Substitute variables in user-data using PowerShell
+    powershell -Command "$content = Get-Content 'U:\autoinstall\user-data' -Raw; $content = $content -replace '\$\{LOCALE:-[^}]+\}', '%LOCALE%'; $content = $content -replace '\$\{KEYBOARD_LAYOUT:-[^}]+\}', '%KEYBOARD_LAYOUT%'; $content = $content -replace '\$\{INSTALL_HOSTNAME:-[^}]+\}', '%INSTALL_HOSTNAME%'; $content = $content -replace '\$\{INSTALL_USERNAME:-[^}]+\}', '%INSTALL_USERNAME%'; $content = $content -replace '\$\{PASSWORD_HASH\}', '%PASSWORD_HASH%'; $content = $content -replace '\$\{TIMEZONE:-[^}]+\}', '%TIMEZONE%'; [System.IO.File]::WriteAllText('U:\autoinstall\user-data', $content)"
+
+    echo User-data template copied and configured.
+) else (
+    echo ERROR: autoinstall\user-data template not found!
+    echo Please ensure the autoinstall directory exists with user-data file.
+    pause
+    exit /b 1
+)
 
 :: Create meta-data file
-(
-    echo instance-id: ubuntu-autoinstall
-    echo local-hostname: %INSTALL_HOSTNAME%
-) > "U:\autoinstall\meta-data"
+if exist "autoinstall\meta-data" (
+    copy "autoinstall\meta-data" "U:\autoinstall\meta-data" >nul
+    powershell -Command "$content = Get-Content 'U:\autoinstall\meta-data' -Raw; $content = $content -replace 'local-hostname:.*', 'local-hostname: %INSTALL_HOSTNAME%'; [System.IO.File]::WriteAllText('U:\autoinstall\meta-data', $content)"
+) else (
+    echo instance-id: ubuntu-autoinstall> "U:\autoinstall\meta-data"
+    echo local-hostname: %INSTALL_HOSTNAME%>> "U:\autoinstall\meta-data"
+)
 
 :: Step 5: Copy scripts
 echo.
@@ -329,13 +273,15 @@ echo Step 5/5: Copying installation scripts...
 
 if not exist "U:\scripts" mkdir "U:\scripts"
 
-:: Copy scripts if they exist
+:: Copy all scripts if they exist
 if exist "scripts\install-drivers.sh" copy "scripts\install-drivers.sh" "U:\scripts\" >nul
 if exist "scripts\post-install.sh" copy "scripts\post-install.sh" "U:\scripts\" >nul
 if exist "scripts\mount-drives.sh" copy "scripts\mount-drives.sh" "U:\scripts\" >nul
 if exist "scripts\install-gui.sh" copy "scripts\install-gui.sh" "U:\scripts\" >nul
+if exist "scripts\configure-drives.sh" copy "scripts\configure-drives.sh" "U:\scripts\" >nul
+if exist "scripts\install-optional-features.sh" copy "scripts\install-optional-features.sh" "U:\scripts\" >nul
 
-:: Create config.env
+:: Create config.env with all settings for unattended operation
 (
     echo INSTALL_USERNAME=%INSTALL_USERNAME%
     echo INSTALL_HOSTNAME=%INSTALL_HOSTNAME%
@@ -351,19 +297,63 @@ if exist "scripts\install-gui.sh" copy "scripts\install-gui.sh" "U:\scripts\" >n
     echo DNS_SERVERS=%DNS_SERVERS%
     echo EXTRA_PACKAGES=%EXTRA_PACKAGES%
     echo AUTO_MOUNT_DRIVES=%AUTO_MOUNT_DRIVES%
+    echo INTERACTIVE_DRIVE_CONFIG=false
+    echo SHOW_OPTIONAL_MENU=false
+    echo UNATTENDED=true
+    echo # Optional features
+    echo INSTALL_DOCKER=%INSTALL_DOCKER%
+    echo INSTALL_PORTAINER=%INSTALL_PORTAINER%
+    echo INSTALL_COCKPIT=%INSTALL_COCKPIT%
+    echo INSTALL_WEBMIN=%INSTALL_WEBMIN%
+    echo INSTALL_TAILSCALE=%INSTALL_TAILSCALE%
+    echo INSTALL_ZEROTIER=%INSTALL_ZEROTIER%
+    echo ENABLE_WAKE_ON_LAN=%ENABLE_WAKE_ON_LAN%
+    echo INSTALL_FAIL2BAN=%INSTALL_FAIL2BAN%
+    echo CONFIGURE_UFW=%CONFIGURE_UFW%
+    echo HARDEN_SSH=%HARDEN_SSH%
+    echo ENABLE_AUTO_UPDATES=%ENABLE_AUTO_UPDATES%
+    echo INSTALL_SAMBA=%INSTALL_SAMBA%
+    echo SAMBA_SHARE_PATH=%SAMBA_SHARE_PATH%
+    echo INSTALL_NFS=%INSTALL_NFS%
+    echo NFS_EXPORT_PATH=%NFS_EXPORT_PATH%
+    echo NFS_ALLOWED_NETWORK=%NFS_ALLOWED_NETWORK%
+    echo INSTALL_PROMETHEUS=%INSTALL_PROMETHEUS%
+    echo INSTALL_NODE_EXPORTER=%INSTALL_NODE_EXPORTER%
+    echo INSTALL_GRAFANA=%INSTALL_GRAFANA%
+    echo INSTALL_SIGNOZ=%INSTALL_SIGNOZ%
+    echo INSTALL_OTEL_COLLECTOR=%INSTALL_OTEL_COLLECTOR%
+    echo OTEL_ENDPOINT=%OTEL_ENDPOINT%
+    echo INSTALL_ANSIBLE=%INSTALL_ANSIBLE%
+    echo CONFIGURE_SWAP=%CONFIGURE_SWAP%
+    echo SWAP_SIZE_GB=%SWAP_SIZE_GB%
+    echo CONFIGURE_NTP=%CONFIGURE_NTP%
+    echo INSTALL_COMMON_TOOLS=%INSTALL_COMMON_TOOLS%
+    echo INSTALL_DEV_TOOLS=%INSTALL_DEV_TOOLS%
+    echo GO_VERSION=%GO_VERSION%
+    echo # Notifications
+    echo WEBHOOK_URL=%WEBHOOK_URL%
 ) > "U:\scripts\config.env"
 
 :: Modify grub.cfg to add autoinstall and set timeout for automatic boot
 echo Configuring boot loader for automatic installation...
 if exist "U:\boot\grub\grub.cfg" (
     attrib -r "U:\boot\grub\grub.cfg"
-    powershell -Command "(Get-Content 'U:\boot\grub\grub.cfg') -replace '(linux\s+[^\r\n]+)', '$1 autoinstall ds=nocloud;s=/cdrom/autoinstall/' | Set-Content 'U:\boot\grub\grub.cfg'"
-    powershell -Command "(Get-Content 'U:\boot\grub\grub.cfg') -replace 'set timeout=\d+', 'set timeout=5' | Set-Content 'U:\boot\grub\grub.cfg'"
+
+    :: Use PowerShell to modify grub.cfg with proper escaping
+    :: Add autoinstall parameters and console output for debugging
+    :: Parameters: autoinstall, console logging (tty + serial), fsck repair
+    powershell -Command "$grub = Get-Content 'U:\boot\grub\grub.cfg' -Raw; if ($grub -notmatch 'autoinstall') { $grub = $grub -replace '(linux\s+/casper/vmlinuz[^\r\n]*)', '$1 autoinstall ds=nocloud\;s=/cdrom/autoinstall/ console=tty0 console=ttyS0,115200n8 fsck.mode=force fsck.repair=yes' }; $grub = $grub -replace 'set timeout=\d+', 'set timeout=10'; if ($grub -notmatch 'timeout_style') { $grub = $grub -replace '(set timeout=\d+)', \"`$1`nset timeout_style=menu\" }; [System.IO.File]::WriteAllText('U:\boot\grub\grub.cfg', $grub)"
+
+    :: Add a fallback safe mode menu entry with nomodeset for problematic graphics
+    powershell -Command "$grub = Get-Content 'U:\boot\grub\grub.cfg' -Raw; if ($grub -notmatch 'Safe Mode') { $safeEntry = \"`nmenuentry 'Ubuntu Server (Safe Mode - nomodeset)' {`n`tlinux /casper/vmlinuz autoinstall ds=nocloud;s=/cdrom/autoinstall/ console=tty0 nomodeset fsck.mode=force fsck.repair=yes ---`n`tinitrd /casper/initrd`n}`n\"; $grub = $grub + $safeEntry }; [System.IO.File]::WriteAllText('U:\boot\grub\grub.cfg', $grub)"
+
+    echo GRUB configuration updated for autoinstall with console logging.
 )
 
-:: Create a custom grub.cfg that auto-selects the install option
-if exist "U:\boot\grub\grub.cfg" (
-    powershell -Command "$content = Get-Content 'U:\boot\grub\grub.cfg' -Raw; if ($content -notmatch 'set timeout_style') { $content = $content -replace '(set timeout=\d+)', \"`$1`nset timeout_style=countdown\" }; Set-Content 'U:\boot\grub\grub.cfg' $content"
+:: Also check for loopback.cfg which some Ubuntu ISOs use
+if exist "U:\boot\grub\loopback.cfg" (
+    attrib -r "U:\boot\grub\loopback.cfg"
+    powershell -Command "$grub = Get-Content 'U:\boot\grub\loopback.cfg' -Raw; if ($grub -notmatch 'autoinstall') { $grub = $grub -replace '(linux\s+/casper/vmlinuz[^\r\n]*)', '$1 autoinstall ds=nocloud\;s=/cdrom/autoinstall/ console=tty0 console=ttyS0,115200n8' }; [System.IO.File]::WriteAllText('U:\boot\grub\loopback.cfg', $grub)"
 )
 
 echo.
@@ -371,12 +361,20 @@ echo ============================================================
 echo USB drive created successfully!
 echo ============================================================
 echo.
+echo FULLY AUTOMATED INSTALLATION - No user interaction required!
+echo.
 echo Next steps:
 echo   1. Safely eject the USB drive
 echo   2. Insert into target computer
 echo   3. Boot from USB (usually F12, F2, or Del at startup)
-echo   4. Select the target drive when prompted
-echo   5. Installation will complete automatically
+echo   4. Installation will proceed automatically on the largest disk
+echo   5. System will reboot and complete post-installation setup
+echo.
+echo The installation will:
+echo   - Auto-select the smallest SSD (ignores HDDs)
+echo   - Install Ubuntu with your configured settings
+echo   - Run post-install scripts on first boot
+echo   - Install configured optional features
 echo.
 echo Supported hardware:
 echo   - HP Elite 8300

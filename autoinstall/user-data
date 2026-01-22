@@ -2,13 +2,43 @@
 autoinstall:
   version: 1
 
-  # Fully automated - use largest available disk
-  # The installer will show a single confirmation before proceeding
+  # Suppress all interactive prompts for fully automated installation
+  interactive-sections: []
+
+  # Early commands run before installation (in live environment)
+  early-commands:
+    # Log installation start time
+    - echo "=== Ubuntu Auto-Install Started: $(date) ===" | tee /run/install-start.log
+    # Check SMART health on all disks and log results (non-blocking)
+    - |
+      echo "=== Disk Health Check ===" | tee /run/disk-health.log
+      for disk in /dev/sd? /dev/nvme?n1; do
+        if [ -e "$disk" ]; then
+          echo "Checking $disk..." | tee -a /run/disk-health.log
+          smartctl -H "$disk" 2>/dev/null | tee -a /run/disk-health.log || echo "SMART not supported on $disk" | tee -a /run/disk-health.log
+        fi
+      done
+      echo "=== Health Check Complete ===" | tee -a /run/disk-health.log
+    # Ensure network is available
+    - |
+      echo "Waiting for network..."
+      for i in $(seq 1 30); do
+        if ping -c 1 8.8.8.8 >/dev/null 2>&1; then
+          echo "Network available"
+          break
+        fi
+        sleep 2
+      done
+
+  # Fully automated - use smallest SSD available
+  # This avoids accidentally installing on large data/HDD drives
   storage:
     layout:
       name: lvm
       match:
-        size: largest
+        size: smallest
+        ssd: true
+        install-media: false
 
   # Locale and keyboard
   locale: ${LOCALE:-en_US.UTF-8}
@@ -115,46 +145,44 @@ autoinstall:
     - mkdir -p /target/opt/ubuntu-installer-scripts
     - mkdir -p /target/opt/ubuntu-installer
 
-    # Copy all scripts
-    - cp /cdrom/scripts/install-drivers.sh /target/opt/ubuntu-installer-scripts/
-    - cp /cdrom/scripts/post-install.sh /target/opt/ubuntu-installer-scripts/
-    - cp /cdrom/scripts/mount-drives.sh /target/opt/ubuntu-installer-scripts/
-    - cp /cdrom/scripts/install-gui.sh /target/opt/ubuntu-installer-scripts/
-    - cp /cdrom/scripts/configure-drives.sh /target/opt/ubuntu-installer-scripts/
-    - cp /cdrom/scripts/install-optional-features.sh /target/opt/ubuntu-installer-scripts/
-    - chmod +x /target/opt/ubuntu-installer-scripts/*.sh
+    # Copy all scripts (with error handling for missing files)
+    - cp /cdrom/scripts/install-drivers.sh /target/opt/ubuntu-installer-scripts/ 2>/dev/null || true
+    - cp /cdrom/scripts/post-install.sh /target/opt/ubuntu-installer-scripts/ 2>/dev/null || true
+    - cp /cdrom/scripts/mount-drives.sh /target/opt/ubuntu-installer-scripts/ 2>/dev/null || true
+    - cp /cdrom/scripts/install-gui.sh /target/opt/ubuntu-installer-scripts/ 2>/dev/null || true
+    - cp /cdrom/scripts/configure-drives.sh /target/opt/ubuntu-installer-scripts/ 2>/dev/null || true
+    - cp /cdrom/scripts/install-optional-features.sh /target/opt/ubuntu-installer-scripts/ 2>/dev/null || true
+    - chmod +x /target/opt/ubuntu-installer-scripts/*.sh 2>/dev/null || true
 
     # Create symlinks in /opt for backward compatibility
-    - ln -sf /opt/ubuntu-installer-scripts/install-drivers.sh /target/opt/install-drivers.sh
-    - ln -sf /opt/ubuntu-installer-scripts/post-install.sh /target/opt/post-install.sh
-    - ln -sf /opt/ubuntu-installer-scripts/mount-drives.sh /target/opt/mount-drives.sh
-    - ln -sf /opt/ubuntu-installer-scripts/install-gui.sh /target/opt/install-gui.sh
-    - ln -sf /opt/ubuntu-installer-scripts/configure-drives.sh /target/opt/configure-drives.sh
-    - ln -sf /opt/ubuntu-installer-scripts/install-optional-features.sh /target/opt/install-optional-features.sh
+    - ln -sf /opt/ubuntu-installer-scripts/install-drivers.sh /target/opt/install-drivers.sh 2>/dev/null || true
+    - ln -sf /opt/ubuntu-installer-scripts/post-install.sh /target/opt/post-install.sh 2>/dev/null || true
+    - ln -sf /opt/ubuntu-installer-scripts/mount-drives.sh /target/opt/mount-drives.sh 2>/dev/null || true
+    - ln -sf /opt/ubuntu-installer-scripts/install-gui.sh /target/opt/install-gui.sh 2>/dev/null || true
+    - ln -sf /opt/ubuntu-installer-scripts/configure-drives.sh /target/opt/configure-drives.sh 2>/dev/null || true
+    - ln -sf /opt/ubuntu-installer-scripts/install-optional-features.sh /target/opt/install-optional-features.sh 2>/dev/null || true
 
     # Copy configuration
-    - cp /cdrom/scripts/config.env /target/opt/ubuntu-installer/config.env
+    - cp /cdrom/scripts/config.env /target/opt/ubuntu-installer/config.env 2>/dev/null || true
 
-    # Create systemd service for first-boot setup
+    # Create systemd service for first-boot setup (unattended mode)
     - |
       cat > /target/etc/systemd/system/first-boot-setup.service << 'EOF'
       [Unit]
       Description=First Boot Setup - Install Drivers and Configure System
-      After=network-online.target getty.target
+      After=network-online.target
       Wants=network-online.target
       ConditionPathExists=/opt/ubuntu-installer-scripts/post-install.sh
 
       [Service]
       Type=oneshot
-      ExecStart=/opt/ubuntu-installer-scripts/post-install.sh
+      ExecStart=/opt/ubuntu-installer-scripts/post-install.sh --unattended
       ExecStartPost=/bin/systemctl disable first-boot-setup.service
       RemainAfterExit=yes
-      StandardInput=tty
-      StandardOutput=tty
-      StandardError=tty
-      TTYPath=/dev/tty1
-      TTYReset=yes
-      TTYVHangup=yes
+      StandardInput=null
+      StandardOutput=journal+console
+      StandardError=journal+console
+      TimeoutStartSec=1800
 
       [Install]
       WantedBy=multi-user.target
@@ -163,6 +191,13 @@ autoinstall:
 
     # Enable SSH
     - curtin in-target --target=/target -- systemctl enable ssh
+
+    # Prevent GRUB from probing/modifying other disks (protects USB boot drive)
+    - echo "GRUB_DISABLE_OS_PROBER=true" >> /target/etc/default/grub
+    - echo "GRUB_FORCE_PARTUUID=" >> /target/etc/default/grub
+
+    # Update GRUB with the new settings
+    - curtin in-target --target=/target -- update-grub
 
     # Update initramfs with NVMe support
     - curtin in-target --target=/target -- update-initramfs -u -k all
