@@ -10,7 +10,7 @@ title Ubuntu Auto Installer USB Creator
 
 echo ============================================================
 echo     Ubuntu Auto Installer USB Creator
-echo     For: HP Elite 8300, Lenovo M92p/M72, ASUS Z97
+echo     For: HP Elite 8300, HP 800 G1, Lenovo M92p/M72, ASUS Z97, Dell T7910
 echo ============================================================
 echo.
 
@@ -52,6 +52,14 @@ if "%INSTALL_USERNAME%"=="" (
     exit /b 1
 )
 
+:: Validate username matches Linux username rules (lowercase, start with letter/underscore, max 32 chars)
+:: Use $env: to avoid command injection from untrusted .env values
+powershell -Command "if ($env:INSTALL_USERNAME -notmatch '^[a-z_][a-z0-9_-]{0,31}$') { Write-Host 'ERROR: INSTALL_USERNAME must be a valid Linux username (lowercase, letters/digits/hyphens/underscores, max 32 chars)'; exit 1 }"
+if errorlevel 1 (
+    pause
+    exit /b 1
+)
+
 if "%INSTALL_PASSWORD%"=="" (
     echo ERROR: INSTALL_PASSWORD is not set in .env file.
     echo Please configure INSTALL_PASSWORD in your .env file.
@@ -65,6 +73,28 @@ if "%INSTALL_HOSTNAME%"=="random" (
 )
 if "%INSTALL_HOSTNAME%"=="" (
     for /f "tokens=*" %%h in ('powershell -Command "[System.Guid]::NewGuid().ToString().Substring(0,6)"') do set INSTALL_HOSTNAME=ubuntu-%%h
+)
+
+:: Validate hostname (RFC 1123: alphanumeric and hyphens, max 63 chars, no leading/trailing hyphen)
+:: Use $env: to avoid command injection from untrusted .env values
+powershell -Command "if ($env:INSTALL_HOSTNAME -notmatch '^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$') { Write-Host 'ERROR: INSTALL_HOSTNAME contains invalid characters (RFC 1123: letters, digits, hyphens only)'; exit 1 }"
+if errorlevel 1 (
+    pause
+    exit /b 1
+)
+
+:: Validate LOCALE format (e.g., en_US.UTF-8)
+powershell -Command "if ($env:LOCALE -and $env:LOCALE -notmatch '^[a-zA-Z_]+(\.[a-zA-Z0-9_-]+)?$') { Write-Host 'ERROR: LOCALE contains invalid characters'; exit 1 }"
+if errorlevel 1 (
+    pause
+    exit /b 1
+)
+
+:: Validate KEYBOARD_LAYOUT format (e.g., us, gb, de)
+powershell -Command "if ($env:KEYBOARD_LAYOUT -and $env:KEYBOARD_LAYOUT -notmatch '^[a-z]{2,10}$') { Write-Host 'ERROR: KEYBOARD_LAYOUT must be a lowercase keyboard layout code'; exit 1 }"
+if errorlevel 1 (
+    pause
+    exit /b 1
 )
 
 echo.
@@ -128,6 +158,62 @@ if not exist "%ISO_PATH%" (
             exit /b 1
         )
         echo Download complete!
+
+        :: Verify ISO integrity (SHA256 checksum + GPG signature if available)
+        echo Verifying ISO integrity...
+        :: Download SHA256SUMS checksum file
+        set "CHECKSUM_DIR_URL=%ISO_URL%"
+        for %%F in ("%ISO_URL%") do set "CHECKSUM_DIR_URL=%%~dpF"
+        set "CHECKSUM_DIR_URL=!CHECKSUM_DIR_URL:\=/!"
+        powershell -Command "& { $ProgressPreference = 'SilentlyContinue'; try { Invoke-WebRequest -Uri '%ISO_URL%.sha256' -OutFile '%ISO_DIR%\SHA256SUMS' } catch { $base = '%ISO_URL%' -replace '/[^/]+$', '/SHA256SUMS'; Invoke-WebRequest -Uri $base -OutFile '%ISO_DIR%\SHA256SUMS' } }" 2>nul
+        if exist "%ISO_DIR%\SHA256SUMS" (
+            :: Attempt GPG signature verification (best-effort: warns if GPG unavailable)
+            powershell -Command "& { $ProgressPreference = 'SilentlyContinue'; $base = '%ISO_URL%' -replace '/[^/]+$', '/SHA256SUMS.gpg'; try { Invoke-WebRequest -Uri $base -OutFile '%ISO_DIR%\SHA256SUMS.gpg' } catch {} }" 2>nul
+            if exist "%ISO_DIR%\SHA256SUMS.gpg" (
+                echo Verifying GPG signature on SHA256SUMS...
+                :: Check if gpg is available (e.g. via Git for Windows or Gpg4win)
+                where gpg >nul 2>&1
+                if not errorlevel 1 (
+                    :: Import Canonical's Ubuntu CD Image signing key
+                    gpg --keyserver hkps://keyserver.ubuntu.com --recv-keys 843938DF228D22F7B3742BC0D94AA3F0EFE21092 2>nul
+                    gpg --verify "%ISO_DIR%\SHA256SUMS.gpg" "%ISO_DIR%\SHA256SUMS" 2>nul
+                    if errorlevel 1 (
+                        echo WARNING: GPG signature verification FAILED! SHA256SUMS may have been tampered with.
+                        set /p CONTINUE_GPG="Continue anyway? (Y/N): "
+                        if /i not "!CONTINUE_GPG!"=="Y" (
+                            del "%ISO_PATH%" 2>nul
+                            del "%ISO_DIR%\SHA256SUMS" 2>nul
+                            del "%ISO_DIR%\SHA256SUMS.gpg" 2>nul
+                            pause
+                            exit /b 1
+                        )
+                    ) else (
+                        echo GPG signature verified OK - SHA256SUMS is authentic.
+                    )
+                ) else (
+                    echo NOTE: GPG not found - cannot verify SHA256SUMS signature.
+                    echo       Install Gpg4win or Git for Windows for full supply chain verification.
+                )
+                del "%ISO_DIR%\SHA256SUMS.gpg" 2>nul
+            ) else (
+                echo NOTE: SHA256SUMS.gpg not available - skipping GPG verification.
+            )
+
+            :: Verify ISO hash against SHA256SUMS (Trim handles BOM/whitespace from Windows downloads)
+            powershell -Command "& { $expected = (Get-Content '%ISO_DIR%\SHA256SUMS' | Select-String '%ISO_NAME%').Line.Split(' ')[0].Trim(); $actual = (Get-FileHash '%ISO_PATH%' -Algorithm SHA256).Hash.Trim(); if ($expected -ieq $actual) { Write-Host 'ISO checksum verified OK' } else { Write-Host ('WARNING: ISO checksum mismatch! Expected: ' + $expected + ' Got: ' + $actual); exit 1 } }"
+            if errorlevel 1 (
+                echo WARNING: ISO checksum verification failed. The download may be corrupt.
+                set /p CONTINUE_ANYWAY="Continue anyway? (Y/N): "
+                if /i not "!CONTINUE_ANYWAY!"=="Y" (
+                    del "%ISO_PATH%" 2>nul
+                    pause
+                    exit /b 1
+                )
+            )
+            del "%ISO_DIR%\SHA256SUMS" 2>nul
+        ) else (
+            echo NOTE: Could not download checksum file - skipping verification.
+        )
     ) else (
         echo Please provide the ISO path or download it first.
         pause
@@ -145,7 +231,7 @@ echo ============================================================
 echo.
 
 :: List available USB drives using PowerShell (with drive letters)
-powershell -Command "Get-Disk | Where-Object { $_.BusType -eq 'USB' -or ($_.Size -lt 256GB -and $_.BusType -ne 'NVMe' -and $_.OperationalStatus -eq 'Online') } | ForEach-Object { $disk = $_; $letters = (Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue | Get-Volume -ErrorAction SilentlyContinue | Where-Object DriveLetter | ForEach-Object { $_.DriveLetter + ':' }) -join ','; [PSCustomObject]@{ Number = $disk.Number; Letters = if($letters){$letters}else{'(none)'}; FriendlyName = $disk.FriendlyName; 'Size(GB)' = [math]::Round($disk.Size/1GB,2); BusType = $disk.BusType } } | Format-Table Number, Letters, FriendlyName, 'Size(GB)', BusType -AutoSize"
+powershell -Command "Get-Disk | Where-Object { $_.BusType -eq 'USB' -or $_.BusType -eq 'SD' } | ForEach-Object { $disk = $_; $letters = (Get-Partition -DiskNumber $disk.Number -ErrorAction SilentlyContinue | Get-Volume -ErrorAction SilentlyContinue | Where-Object DriveLetter | ForEach-Object { $_.DriveLetter + ':' }) -join ','; [PSCustomObject]@{ Number = $disk.Number; Letters = if($letters){$letters}else{'(none)'}; FriendlyName = $disk.FriendlyName; 'Size(GB)' = [math]::Round($disk.Size/1GB,2); BusType = $disk.BusType } } | Format-Table Number, Letters, FriendlyName, 'Size(GB)', BusType -AutoSize"
 
 echo.
 echo WARNING: All data on the selected drive will be ERASED!
@@ -155,6 +241,28 @@ set /p DISK_NUMBER="Enter disk number to use (or 'q' to quit): "
 if /i "%DISK_NUMBER%"=="q" (
     echo Operation cancelled.
     exit /b 0
+)
+
+:: Validate disk number is a positive integer
+echo !DISK_NUMBER!| findstr /r "^[0-9][0-9]*$" >nul 2>&1
+if errorlevel 1 (
+    echo ERROR: Invalid disk number. Must be a number.
+    goto :select_usb
+)
+
+:: Reject disk 0 (typically the system drive)
+if "!DISK_NUMBER!"=="0" (
+    echo ERROR: Disk 0 is typically the Windows system disk. Cannot continue.
+    echo Select a USB drive with a different disk number.
+    goto :select_usb
+)
+
+:: Validate the selected disk is actually a USB/SD device
+for /f "tokens=*" %%b in ('powershell -Command "(Get-Disk -Number %DISK_NUMBER%).BusType"') do set DISK_BUS=%%b
+if /i not "!DISK_BUS!"=="USB" if /i not "!DISK_BUS!"=="SD" (
+    echo ERROR: Disk %DISK_NUMBER% is not a USB or SD device ^(detected: !DISK_BUS!^).
+    echo Only USB and SD drives can be used. Please select a different disk.
+    goto :select_usb
 )
 
 :: Confirm selection
@@ -179,7 +287,31 @@ echo ============================================================
 
 :: Step 1: Clean and partition the disk
 echo.
-echo Step 1/5: Cleaning disk...
+echo Step 1/6: Cleaning disk and erasing old boot structures...
+
+:: First, release any existing drive letters on this disk to avoid conflicts
+powershell -Command "Get-Partition -DiskNumber %DISK_NUMBER% -ErrorAction SilentlyContinue | ForEach-Object { $_ | Remove-PartitionAccessPath -AccessPath \"$($_.DriveLetter):\" -ErrorAction SilentlyContinue }"
+
+:: Find a free drive letter (prefer U, fallback to others)
+set USB_LETTER=
+for %%L in (U V W X Y Z T S R Q P) do (
+    if "!USB_LETTER!"=="" (
+        if not exist "%%L:\" (
+            set USB_LETTER=%%L
+        )
+    )
+)
+if "!USB_LETTER!"=="" (
+    echo ERROR: No free drive letters available.
+    pause
+    exit /b 1
+)
+echo Using drive letter !USB_LETTER!: for USB
+
+:: Zero out the first 1MB to obliterate any residual boot structures
+:: (EFI bootloaders, Windows Boot Manager remnants, old GPT headers)
+echo Wiping residual boot sectors...
+powershell -Command "& { $drive = '\\.\PhysicalDrive%DISK_NUMBER%'; $fs = [IO.File]::Open($drive, 'Open', 'ReadWrite', 'ReadWrite'); $zeros = New-Object byte[] (1MB); $fs.Write($zeros, 0, $zeros.Length); $fs.Flush(); $fs.Close(); Write-Host 'Boot sectors wiped' }" 2>nul
 
 :: Create diskpart script - use MBR with single FAT32 partition for USB compatibility
 :: Note: GPT EFI partitions are not supported on removable media in Windows
@@ -190,8 +322,8 @@ echo Step 1/5: Cleaning disk...
     echo create partition primary
     echo select partition 1
     echo active
-    echo format quick fs=fat32 label="UBUNTU"
-    echo assign letter=U
+    echo format fs=fat32 label="UBUNTU" quick
+    echo assign letter=!USB_LETTER!
     echo exit
 ) > "%TEMP%\diskpart_script.txt"
 
@@ -205,18 +337,28 @@ if %errorlevel% neq 0 (
 )
 del "%TEMP%\diskpart_script.txt"
 
+:: Verify the drive letter was actually assigned
+if not exist "!USB_LETTER!:\" (
+    echo ERROR: Drive letter !USB_LETTER!: was not assigned. The disk may not have been formatted properly.
+    pause
+    exit /b 1
+)
+echo Disk cleaned and formatted successfully.
+
 :: Step 2: Mount ISO and copy contents
 echo.
-echo Step 2/5: Mounting ISO and extracting contents...
+echo Step 2/6: Mounting ISO and extracting contents...
 
 :: Convert relative ISO path to absolute (Mount-DiskImage requires absolute path)
 for %%i in ("%ISO_PATH%") do set ISO_FULLPATH=%%~fi
 
-:: Mount the ISO
-for /f "tokens=*" %%i in ('powershell -Command "(Mount-DiskImage -ImagePath '!ISO_FULLPATH!' -PassThru | Get-Volume).DriveLetter"') do set ISO_DRIVE=%%i
+:: Mount the ISO (use $env: to safely handle paths with spaces or special characters)
+set "ISO_FULLPATH_ENV=!ISO_FULLPATH!"
+for /f "tokens=*" %%i in ('powershell -Command "(Mount-DiskImage -ImagePath $env:ISO_FULLPATH_ENV -PassThru | Get-Volume).DriveLetter"') do set ISO_DRIVE=%%i
 
 if "%ISO_DRIVE%"=="" (
     echo ERROR: Failed to mount ISO.
+    powershell -Command "Dismount-DiskImage -ImagePath $env:ISO_FULLPATH_ENV" 2>nul
     pause
     exit /b 1
 )
@@ -225,63 +367,143 @@ echo ISO mounted on drive %ISO_DRIVE%:
 
 :: Step 3: Copy ISO contents
 echo.
-echo Step 3/5: Copying ISO contents to USB (this may take several minutes)...
+echo Step 3/6: Copying ISO contents to USB (this may take several minutes)...
 
 :: Copy all ISO contents to USB (single partition handles both UEFI and legacy boot)
-robocopy %ISO_DRIVE%:\ U:\ /E /NFL /NDL /NJH /NJS /R:3 /W:5
+robocopy %ISO_DRIVE%:\ !USB_LETTER!:\ /E /NFL /NDL /NJH /NJS /R:3 /W:5
+
+:: Check robocopy exit code (0-7 = success/warning, 8+ = error)
+set ROBO_RC=%errorlevel%
+if %ROBO_RC% geq 8 (
+    echo ERROR: Robocopy failed with exit code %ROBO_RC%. ISO contents may not have copied correctly.
+    powershell -Command "Dismount-DiskImage -ImagePath $env:ISO_FULLPATH_ENV" 2>nul
+    pause
+    exit /b 1
+)
+
+:: Check for files that exceeded FAT32 4GB limit (would have been silently skipped by robocopy)
+powershell -Command "& { $big = Get-ChildItem '%ISO_DRIVE%:\' -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.Length -gt 4GB }; if ($big) { $big | ForEach-Object { Write-Host ('WARNING: File exceeds FAT32 4GB limit: ' + $_.FullName + ' (' + [math]::Round($_.Length/1GB,2) + ' GB)') }; exit 1 } }"
+if errorlevel 1 (
+    echo ERROR: Ubuntu ISO contains files larger than 4GB that cannot be stored on FAT32.
+    echo Consider using a tool like Rufus with NTFS support or a newer Ubuntu ISO.
+    powershell -Command "Dismount-DiskImage -ImagePath $env:ISO_FULLPATH_ENV" 2>nul
+    pause
+    exit /b 1
+)
 
 :: Unmount ISO
-powershell -Command "Dismount-DiskImage -ImagePath '!ISO_FULLPATH!'"
+powershell -Command "Dismount-DiskImage -ImagePath $env:ISO_FULLPATH_ENV"
 
 :: Step 4: Create autoinstall configuration
 echo.
-echo Step 4/5: Creating autoinstall configuration...
+echo Step 4/6: Creating autoinstall configuration...
 
-if not exist "U:\autoinstall" mkdir "U:\autoinstall"
+if not exist "!USB_LETTER!:\autoinstall" mkdir "!USB_LETTER!:\autoinstall"
 
-:: Generate password hash using PowerShell
-for /f "tokens=*" %%h in ('powershell -Command "$password = '%INSTALL_PASSWORD%'; $bytes = [System.Text.Encoding]::UTF8.GetBytes($password); $sha512 = [System.Security.Cryptography.SHA512]::Create(); $hash = $sha512.ComputeHash($bytes); '$6$rounds=4096$randomsalt$' + [Convert]::ToBase64String($hash)"') do set PASSWORD_HASH=%%h
+:: Generate proper crypt(3) SHA-512 password hash
+:: Password is passed via PowerShell variable to avoid exposure in process listings
+:: (echo piping would make the password visible in Windows process table)
+set PASSWORD_HASH=
+:: Pass password via environment variable to avoid quoting issues with special characters
+:: (single quotes, percent signs, etc. would break string interpolation)
+set "INSTALL_PW_TEMP=!INSTALL_PASSWORD!"
+:: Try Python with passlib first (most reliable, works on all Python versions)
+for /f "tokens=*" %%h in ('powershell -Command "$pw = $env:INSTALL_PW_TEMP; $pw | python -c \"import sys; pw=sys.stdin.readline^(^).strip^(^); from passlib.hash import sha512_crypt; print^(sha512_crypt.using^(rounds=656000^).hash^(pw^)^)\"" 2^>nul') do set PASSWORD_HASH=%%h
+:: Try Python crypt module (available in Python 3.12 and below, removed in 3.13)
+:: Note: single-line if (no parenthesized block) to avoid cmd.exe misinterpreting ) in .strip()
+if "!PASSWORD_HASH!"=="" for /f "tokens=*" %%h in ('powershell -Command "$pw = $env:INSTALL_PW_TEMP; $pw | python -c \"import sys,crypt; pw=sys.stdin.readline^(^).strip^(^); print^(crypt.crypt^(pw,crypt.mksalt^(crypt.METHOD_SHA512^)^)^)\"" 2^>nul') do set PASSWORD_HASH=%%h
+:: Fallback to WSL openssl (password via stdin)
+if "!PASSWORD_HASH!"=="" (
+    for /f "tokens=*" %%h in ('powershell -Command "$pw = $env:INSTALL_PW_TEMP; $pw | wsl openssl passwd -6 -stdin" 2^>nul') do set PASSWORD_HASH=%%h
+)
+:: Fallback to WSL mkpasswd
+if "!PASSWORD_HASH!"=="" (
+    for /f "tokens=*" %%h in ('powershell -Command "$pw = $env:INSTALL_PW_TEMP; $pw | wsl mkpasswd --method=SHA-512 --stdin" 2^>nul') do set PASSWORD_HASH=%%h
+)
+:: Error if none worked
+if "!PASSWORD_HASH!"=="" (
+    echo ERROR: Could not generate password hash.
+    echo Please install Python 3 with passlib, or enable WSL with openssl.
+    pause
+    exit /b 1
+)
+:: Clear plaintext password from environment (hash is the only value needed from here)
+set "INSTALL_PW_TEMP="
+set "INSTALL_PASSWORD="
+
+:: Apply defaults for optional template variables not defined in .env
+if "!LOCALE!"=="" set "LOCALE=en_US.UTF-8"
+if "!KEYBOARD_LAYOUT!"=="" set "KEYBOARD_LAYOUT=us"
+if "!TIMEZONE!"=="" set "TIMEZONE=America/New_York"
 
 :: Create user-data file by copying template and substituting variables
-:: Copy the template from autoinstall directory
-if exist "autoinstall\user-data" (
-    copy "autoinstall\user-data" "U:\autoinstall\user-data" >nul
-
-    :: Substitute variables in user-data using PowerShell
-    powershell -Command "$content = Get-Content 'U:\autoinstall\user-data' -Raw; $content = $content -replace '\$\{LOCALE:-[^}]+\}', '%LOCALE%'; $content = $content -replace '\$\{KEYBOARD_LAYOUT:-[^}]+\}', '%KEYBOARD_LAYOUT%'; $content = $content -replace '\$\{INSTALL_HOSTNAME:-[^}]+\}', '%INSTALL_HOSTNAME%'; $content = $content -replace '\$\{INSTALL_USERNAME:-[^}]+\}', '%INSTALL_USERNAME%'; $content = $content -replace '\$\{PASSWORD_HASH\}', '%PASSWORD_HASH%'; $content = $content -replace '\$\{TIMEZONE:-[^}]+\}', '%TIMEZONE%'; [System.IO.File]::WriteAllText('U:\autoinstall\user-data', $content)"
-
-    echo User-data template copied and configured.
-) else (
+if not exist "autoinstall\user-data" (
     echo ERROR: autoinstall\user-data template not found!
     echo Please ensure the autoinstall directory exists with user-data file.
     pause
     exit /b 1
 )
+:: Copy the template from autoinstall directory
+copy "autoinstall\user-data" "!USB_LETTER!:\autoinstall\user-data" >nul
+
+:: Substitute variables in user-data using PowerShell
+:: All values passed via $env: to avoid cmd.exe delayed expansion corrupting ! and $ characters
+:: $ErrorActionPreference='Stop' ensures any error halts execution before WriteAllText
+powershell -Command "$ErrorActionPreference='Stop'; $c = Get-Content '!USB_LETTER!:\autoinstall\user-data' -Raw; $c = $c -replace '\$\{LOCALE:-[^}]+\}', $env:LOCALE; $c = $c -replace '\$\{KEYBOARD_LAYOUT:-[^}]+\}', $env:KEYBOARD_LAYOUT; $c = $c -replace '\$\{INSTALL_HOSTNAME:-[^}]+\}', $env:INSTALL_HOSTNAME; $c = $c -replace '\$\{INSTALL_USERNAME:-[^}]+\}', $env:INSTALL_USERNAME; $c = $c.Replace('${PASSWORD_HASH}', $env:PASSWORD_HASH); $c = $c -replace '\$\{TIMEZONE:-[^}]+\}', $env:TIMEZONE; [System.IO.File]::WriteAllText('!USB_LETTER!:\autoinstall\user-data', $c)"
+if errorlevel 1 (
+    echo ERROR: Failed to substitute variables in user-data template.
+    pause
+    exit /b 1
+)
+:: Verify no unsubstituted template variables remain in user-data
+powershell -Command "if ((Get-Content '!USB_LETTER!:\autoinstall\user-data' -Raw) -match '\$\{[A-Z_]+') { Write-Host 'ERROR: Unsubstituted template variables remain in user-data'; exit 1 }"
+if errorlevel 1 (
+    echo ERROR: user-data still contains unsubstituted template variables.
+    echo Please verify your .env file contains all required settings.
+    pause
+    exit /b 1
+)
+echo User-data template copied and configured.
+
+:: Generate unique instance-id per USB creation
+for /f "tokens=*" %%i in ('powershell -Command "[System.Guid]::NewGuid().ToString()"') do set INSTANCE_ID=%%i
 
 :: Create meta-data file
 if exist "autoinstall\meta-data" (
-    copy "autoinstall\meta-data" "U:\autoinstall\meta-data" >nul
-    powershell -Command "$content = Get-Content 'U:\autoinstall\meta-data' -Raw; $content = $content -replace 'local-hostname:.*', 'local-hostname: %INSTALL_HOSTNAME%'; [System.IO.File]::WriteAllText('U:\autoinstall\meta-data', $content)"
+    copy "autoinstall\meta-data" "!USB_LETTER!:\autoinstall\meta-data" >nul
+    powershell -Command "$content = Get-Content '!USB_LETTER!:\autoinstall\meta-data' -Raw; $content = $content -replace 'instance-id:.*', 'instance-id: %INSTANCE_ID%'; $content = $content -replace 'local-hostname:.*', 'local-hostname: %INSTALL_HOSTNAME%'; [System.IO.File]::WriteAllText('!USB_LETTER!:\autoinstall\meta-data', $content)"
 ) else (
-    echo instance-id: ubuntu-autoinstall> "U:\autoinstall\meta-data"
-    echo local-hostname: %INSTALL_HOSTNAME%>> "U:\autoinstall\meta-data"
+    echo instance-id: %INSTANCE_ID%> "!USB_LETTER!:\autoinstall\meta-data"
+    echo local-hostname: %INSTALL_HOSTNAME%>> "!USB_LETTER!:\autoinstall\meta-data"
 )
 
 :: Step 5: Copy scripts
 echo.
-echo Step 5/5: Copying installation scripts...
+echo Step 5/6: Copying installation scripts...
 
-if not exist "U:\scripts" mkdir "U:\scripts"
+if not exist "!USB_LETTER!:\scripts" mkdir "!USB_LETTER!:\scripts"
 
 :: Copy all scripts if they exist
-if exist "scripts\install-drivers.sh" copy "scripts\install-drivers.sh" "U:\scripts\" >nul
-if exist "scripts\post-install.sh" copy "scripts\post-install.sh" "U:\scripts\" >nul
-if exist "scripts\mount-drives.sh" copy "scripts\mount-drives.sh" "U:\scripts\" >nul
-if exist "scripts\install-gui.sh" copy "scripts\install-gui.sh" "U:\scripts\" >nul
-if exist "scripts\configure-drives.sh" copy "scripts\configure-drives.sh" "U:\scripts\" >nul
-if exist "scripts\install-optional-features.sh" copy "scripts\install-optional-features.sh" "U:\scripts\" >nul
+if exist "scripts\install-drivers.sh" copy "scripts\install-drivers.sh" "!USB_LETTER!:\scripts\" >nul
+if exist "scripts\post-install.sh" copy "scripts\post-install.sh" "!USB_LETTER!:\scripts\" >nul
+if exist "scripts\mount-drives.sh" copy "scripts\mount-drives.sh" "!USB_LETTER!:\scripts\" >nul
+if exist "scripts\install-gui.sh" copy "scripts\install-gui.sh" "!USB_LETTER!:\scripts\" >nul
+if exist "scripts\configure-drives.sh" copy "scripts\configure-drives.sh" "!USB_LETTER!:\scripts\" >nul
+if exist "scripts\install-optional-features.sh" copy "scripts\install-optional-features.sh" "!USB_LETTER!:\scripts\" >nul
+if exist "scripts\early-setup.sh" copy "scripts\early-setup.sh" "!USB_LETTER!:\scripts\" >nul
+
+:: Convert Windows CRLF line endings to Unix LF for all shell scripts and YAML files
+:: This is critical - CRLF causes "bad interpreter" errors on Linux
+echo Converting line endings to Unix format...
+powershell -Command "Get-ChildItem '!USB_LETTER!:\scripts\*.sh' -ErrorAction SilentlyContinue | ForEach-Object { $c = [System.IO.File]::ReadAllText($_.FullName); $c = $c -replace \"`r`n\", \"`n\"; [System.IO.File]::WriteAllText($_.FullName, $c, (New-Object System.Text.UTF8Encoding $false)) }"
+powershell -Command "if (Test-Path '!USB_LETTER!:\autoinstall\user-data') { $c = [System.IO.File]::ReadAllText('!USB_LETTER!:\autoinstall\user-data'); $c = $c -replace \"`r`n\", \"`n\"; [System.IO.File]::WriteAllText('!USB_LETTER!:\autoinstall\user-data', $c, (New-Object System.Text.UTF8Encoding $false)) }"
+if exist "!USB_LETTER!:\autoinstall\meta-data" (
+    powershell -Command "$c = [System.IO.File]::ReadAllText('!USB_LETTER!:\autoinstall\meta-data'); $c = $c -replace \"`r`n\", \"`n\"; [System.IO.File]::WriteAllText('!USB_LETTER!:\autoinstall\meta-data', $c, (New-Object System.Text.UTF8Encoding $false))"
+)
 
 :: Create config.env with all settings for unattended operation
+:: NOTE: config.env is generated below by Windows echo commands which produce CRLF.
+:: It MUST be converted to LF after creation (see conversion step below).
 (
     echo INSTALL_USERNAME=%INSTALL_USERNAME%
     echo INSTALL_HOSTNAME=%INSTALL_HOSTNAME%
@@ -292,10 +514,11 @@ if exist "scripts\install-optional-features.sh" copy "scripts\install-optional-f
     echo SSH_AUTHORIZED_KEYS=%SSH_AUTHORIZED_KEYS%
     echo STATIC_IP=%STATIC_IP%
     echo IP_ADDRESS=%IP_ADDRESS%
-    echo NETMASK=%NETMASK%
+    echo NETMASK=%CIDR_PREFIX%
     echo GATEWAY=%GATEWAY%
     echo DNS_SERVERS=%DNS_SERVERS%
     echo EXTRA_PACKAGES=%EXTRA_PACKAGES%
+    echo LAN_CIDR=%LAN_CIDR%
     echo AUTO_MOUNT_DRIVES=%AUTO_MOUNT_DRIVES%
     echo INTERACTIVE_DRIVE_CONFIG=false
     echo SHOW_OPTIONAL_MENU=false
@@ -332,42 +555,116 @@ if exist "scripts\install-optional-features.sh" copy "scripts\install-optional-f
     echo GO_VERSION=%GO_VERSION%
     echo # Notifications
     echo WEBHOOK_URL=%WEBHOOK_URL%
-) > "U:\scripts\config.env"
+) > "!USB_LETTER!:\scripts\config.env"
+
+:: Convert config.env CRLF to LF (critical: CRLF causes trailing \r in values,
+:: breaking all config checks like [ "$VAR" = "true" ] on Linux)
+powershell -Command "$c = [System.IO.File]::ReadAllText('!USB_LETTER!:\scripts\config.env'); $c = $c -replace \"`r`n\", \"`n\"; [System.IO.File]::WriteAllText('!USB_LETTER!:\scripts\config.env', $c, (New-Object System.Text.UTF8Encoding $false))"
 
 :: Modify grub.cfg to add autoinstall and set timeout for automatic boot
 echo Configuring boot loader for automatic installation...
-if exist "U:\boot\grub\grub.cfg" (
-    attrib -r "U:\boot\grub\grub.cfg"
+if exist "!USB_LETTER!:\boot\grub\grub.cfg" (
+    attrib -r "!USB_LETTER!:\boot\grub\grub.cfg"
 
     :: Use PowerShell to modify grub.cfg with proper escaping
     :: Add autoinstall parameters and console output for debugging
-    :: Parameters: autoinstall, console logging (tty + serial), fsck repair
-    powershell -Command "$grub = Get-Content 'U:\boot\grub\grub.cfg' -Raw; if ($grub -notmatch 'autoinstall') { $grub = $grub -replace '(linux\s+/casper/vmlinuz[^\r\n]*)', '$1 autoinstall ds=nocloud\;s=/cdrom/autoinstall/ console=tty0 console=ttyS0,115200n8 fsck.mode=force fsck.repair=yes' }; $grub = $grub -replace 'set timeout=\d+', 'set timeout=10'; if ($grub -notmatch 'timeout_style') { $grub = $grub -replace '(set timeout=\d+)', \"`$1`nset timeout_style=menu\" }; [System.IO.File]::WriteAllText('U:\boot\grub\grub.cfg', $grub)"
+    :: Parameters: autoinstall, console=tty0 only (serial console configured per-platform by install-drivers.sh)
+    powershell -Command "$grub = Get-Content '!USB_LETTER!:\boot\grub\grub.cfg' -Raw; if ($grub -notmatch 'autoinstall') { $grub = $grub -replace '(linux\s+/casper/vmlinuz[^\r\n]*)', '$1 autoinstall ds=nocloud\;s=/cdrom/autoinstall/ console=tty0 fsck.repair=preen' }; $grub = $grub -replace 'set timeout=\d+', 'set timeout=10'; if ($grub -notmatch 'timeout_style') { $grub = $grub -replace '(set timeout=\d+)', \"`$1`nset timeout_style=menu\" }; [System.IO.File]::WriteAllText('!USB_LETTER!:\boot\grub\grub.cfg', $grub)"
 
     :: Add a fallback safe mode menu entry with nomodeset for problematic graphics
-    powershell -Command "$grub = Get-Content 'U:\boot\grub\grub.cfg' -Raw; if ($grub -notmatch 'Safe Mode') { $safeEntry = \"`nmenuentry 'Ubuntu Server (Safe Mode - nomodeset)' {`n`tlinux /casper/vmlinuz autoinstall ds=nocloud;s=/cdrom/autoinstall/ console=tty0 nomodeset fsck.mode=force fsck.repair=yes ---`n`tinitrd /casper/initrd`n}`n\"; $grub = $grub + $safeEntry }; [System.IO.File]::WriteAllText('U:\boot\grub\grub.cfg', $grub)"
+    powershell -Command "$grub = Get-Content '!USB_LETTER!:\boot\grub\grub.cfg' -Raw; if ($grub -notmatch 'Safe Mode') { $safeEntry = [char]10 + 'menuentry ''Ubuntu Server - Safe Mode - nomodeset'' {' + [char]10 + [char]9 + 'linux /casper/vmlinuz autoinstall ds=nocloud\;s=/cdrom/autoinstall/ console=tty0 nomodeset fsck.repair=preen ---' + [char]10 + [char]9 + 'initrd /casper/initrd' + [char]10 + '}' + [char]10; $grub = $grub + $safeEntry }; [System.IO.File]::WriteAllText('!USB_LETTER!:\boot\grub\grub.cfg', $grub)"
+
+    :: Verify autoinstall was injected into grub.cfg
+    powershell -Command "if ((Get-Content '!USB_LETTER!:\boot\grub\grub.cfg' -Raw) -notmatch 'autoinstall') { Write-Host 'ERROR: autoinstall not found in grub.cfg - GRUB patching failed!'; exit 1 }"
+    if errorlevel 1 (
+        echo ERROR: Failed to inject autoinstall into GRUB configuration.
+        pause
+        exit /b 1
+    )
 
     echo GRUB configuration updated for autoinstall with console logging.
+) else (
+    echo WARNING: grub.cfg not found on USB - ISO contents may not have copied correctly!
 )
 
 :: Also check for loopback.cfg which some Ubuntu ISOs use
-if exist "U:\boot\grub\loopback.cfg" (
-    attrib -r "U:\boot\grub\loopback.cfg"
-    powershell -Command "$grub = Get-Content 'U:\boot\grub\loopback.cfg' -Raw; if ($grub -notmatch 'autoinstall') { $grub = $grub -replace '(linux\s+/casper/vmlinuz[^\r\n]*)', '$1 autoinstall ds=nocloud\;s=/cdrom/autoinstall/ console=tty0 console=ttyS0,115200n8' }; [System.IO.File]::WriteAllText('U:\boot\grub\loopback.cfg', $grub)"
+if exist "!USB_LETTER!:\boot\grub\loopback.cfg" (
+    attrib -r "!USB_LETTER!:\boot\grub\loopback.cfg"
+    powershell -Command "$grub = Get-Content '!USB_LETTER!:\boot\grub\loopback.cfg' -Raw; if ($grub -notmatch 'autoinstall') { $grub = $grub -replace '(linux\s+/casper/vmlinuz[^\r\n]*)', '$1 autoinstall ds=nocloud\;s=/cdrom/autoinstall/ console=tty0' }; [System.IO.File]::WriteAllText('!USB_LETTER!:\boot\grub\loopback.cfg', $grub)"
+)
+
+:: Convert grub.cfg line endings to Unix LF (GRUB can have issues with mixed CRLF/LF)
+if exist "!USB_LETTER!:\boot\grub\grub.cfg" (
+    powershell -Command "$c = [System.IO.File]::ReadAllText('!USB_LETTER!:\boot\grub\grub.cfg'); $c = $c -replace \"`r`n\", \"`n\"; [System.IO.File]::WriteAllText('!USB_LETTER!:\boot\grub\grub.cfg', $c, (New-Object System.Text.UTF8Encoding $false))"
+)
+if exist "!USB_LETTER!:\boot\grub\loopback.cfg" (
+    powershell -Command "$c = [System.IO.File]::ReadAllText('!USB_LETTER!:\boot\grub\loopback.cfg'); $c = $c -replace \"`r`n\", \"`n\"; [System.IO.File]::WriteAllText('!USB_LETTER!:\boot\grub\loopback.cfg', $c, (New-Object System.Text.UTF8Encoding $false))"
+)
+
+:: Step 6: Verify USB contents
+echo.
+echo Step 6/6: Verifying USB boot files...
+
+set VERIFY_PASS=true
+
+:: Check for critical Ubuntu boot files
+if not exist "!USB_LETTER!:\EFI\BOOT\BOOTx64.EFI" (
+    echo WARNING: EFI bootloader not found - UEFI boot may not work!
+    set VERIFY_PASS=false
+)
+if not exist "!USB_LETTER!:\boot\grub\grub.cfg" (
+    echo WARNING: GRUB config not found - boot may not work!
+    set VERIFY_PASS=false
+)
+if not exist "!USB_LETTER!:\casper\vmlinuz" (
+    echo WARNING: Linux kernel not found - ISO may not have copied correctly!
+    set VERIFY_PASS=false
+)
+if not exist "!USB_LETTER!:\casper\initrd" (
+    echo WARNING: initrd not found - ISO may not have copied correctly!
+    set VERIFY_PASS=false
+)
+if not exist "!USB_LETTER!:\autoinstall\user-data" (
+    echo WARNING: autoinstall user-data not found!
+    set VERIFY_PASS=false
+)
+
+:: Check that NO Windows boot files exist (should have been wiped)
+if exist "!USB_LETTER!:\EFI\Microsoft" (
+    echo WARNING: Windows EFI boot files detected on USB - removing...
+    rmdir /s /q "!USB_LETTER!:\EFI\Microsoft" 2>nul
+)
+if exist "!USB_LETTER!:\sources\install.wim" (
+    echo ERROR: Windows installation files found on USB! The drive was not properly wiped.
+    echo Please try again with a different USB drive.
+    set VERIFY_PASS=false
+)
+
+if "!VERIFY_PASS!"=="true" (
+    echo All boot files verified successfully.
+) else (
+    echo.
+    echo WARNING: Some verification checks failed. The USB may not boot correctly.
+    echo Consider trying again or using a different USB drive.
 )
 
 echo.
 echo ============================================================
-echo USB drive created successfully!
+echo USB drive created on !USB_LETTER!:
 echo ============================================================
 echo.
 echo FULLY AUTOMATED INSTALLATION - No user interaction required!
+echo.
+echo IMPORTANT - Before installing, verify BIOS settings:
+echo   - Boot mode must be set to UEFI (not Legacy/CSM)
+echo   - Secure Boot must be DISABLED
+echo   - HP: F10, Lenovo: F1, Dell: F2, ASUS: Del for BIOS setup
 echo.
 echo Next steps:
 echo   1. Safely eject the USB drive
 echo   2. Insert into target computer
 echo   3. Boot from USB (usually F12, F2, or Del at startup)
-echo   4. Installation will proceed automatically on the largest disk
+echo   4. Installation will proceed automatically on the smallest SSD
 echo   5. System will reboot and complete post-installation setup
 echo.
 echo The installation will:
@@ -376,11 +673,16 @@ echo   - Install Ubuntu with your configured settings
 echo   - Run post-install scripts on first boot
 echo   - Install configured optional features
 echo.
+echo NOTE: FAT32 USB drives are limited to 32GB by Windows formatting.
+echo   For larger drives, use a third-party tool to format as FAT32 first.
+echo.
 echo Supported hardware:
 echo   - HP Elite 8300
+echo   - HP EliteDesk 800 G1 SFF
 echo   - Lenovo ThinkCentre M92p
 echo   - Lenovo ThinkCentre M72
 echo   - ASUS Z97 motherboards
+echo   - Dell Precision T7910
 echo   - ASUS Hyper M.2 x16 Card V2
 echo.
 
