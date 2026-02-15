@@ -35,14 +35,13 @@ if not exist ".env" (
 )
 
 echo Loading configuration from .env file...
-for /f "usebackq tokens=1,* delims==" %%a in (".env") do (
-    set "line=%%a"
-    if not "!line:~0,1!"=="#" (
-        if not "%%a"=="" (
-            set "%%a=%%b"
-        )
-    )
+:: Temporarily disable delayed expansion to preserve ! in values (e.g. passwords)
+:: eol=# skips comment lines without needing delayed expansion for the check
+endlocal
+for /f "usebackq eol=# tokens=1,* delims==" %%a in (".env") do (
+    if not "%%a"=="" set "%%a=%%b"
 )
+setlocal enabledelayedexpansion
 
 :: Validate required fields
 if "%INSTALL_USERNAME%"=="" (
@@ -401,24 +400,40 @@ echo Step 4/6: Creating autoinstall configuration...
 if not exist "!USB_LETTER!:\autoinstall" mkdir "!USB_LETTER!:\autoinstall"
 
 :: Generate proper crypt(3) SHA-512 password hash
-:: Password is passed via PowerShell variable to avoid exposure in process listings
-:: (echo piping would make the password visible in Windows process table)
+:: Password is read directly via $env:INSTALL_PASSWORD to avoid delayed expansion
+:: stripping ! characters from the password value
+:: Note: output is captured via temp file instead of for /f, because for /f strips
+:: ; and = from the command string (CMD treats them as token delimiters)
 set PASSWORD_HASH=
-:: Pass password via environment variable to avoid quoting issues with special characters
-:: (single quotes, percent signs, etc. would break string interpolation)
-set "INSTALL_PW_TEMP=!INSTALL_PASSWORD!"
 :: Try Python with passlib first (most reliable, works on all Python versions)
-for /f "tokens=*" %%h in ('powershell -Command "$pw = $env:INSTALL_PW_TEMP; $pw | python -c \"import sys; pw=sys.stdin.readline^(^).strip^(^); from passlib.hash import sha512_crypt; print^(sha512_crypt.using^(rounds=656000^).hash^(pw^)^)\"" 2^>nul') do set PASSWORD_HASH=%%h
+powershell -Command "$pw = $env:INSTALL_PASSWORD; $pw | python -c \"import sys; pw=sys.stdin.readline^(^).strip^(^); from passlib.hash import sha512_crypt; print^(sha512_crypt.using^(rounds=656000^).hash^(pw^)^)\"" > "%TEMP%\pwhash.tmp" 2>nul
+if exist "%TEMP%\pwhash.tmp" (
+    set /p PASSWORD_HASH=<"%TEMP%\pwhash.tmp"
+    del "%TEMP%\pwhash.tmp" 2>nul
+)
 :: Try Python crypt module (available in Python 3.12 and below, removed in 3.13)
-:: Note: single-line if (no parenthesized block) to avoid cmd.exe misinterpreting ) in .strip()
-if "!PASSWORD_HASH!"=="" for /f "tokens=*" %%h in ('powershell -Command "$pw = $env:INSTALL_PW_TEMP; $pw | python -c \"import sys,crypt; pw=sys.stdin.readline^(^).strip^(^); print^(crypt.crypt^(pw,crypt.mksalt^(crypt.METHOD_SHA512^)^)^)\"" 2^>nul') do set PASSWORD_HASH=%%h
-:: Fallback to WSL openssl (password via stdin)
 if "!PASSWORD_HASH!"=="" (
-    for /f "tokens=*" %%h in ('powershell -Command "$pw = $env:INSTALL_PW_TEMP; $pw | wsl openssl passwd -6 -stdin" 2^>nul') do set PASSWORD_HASH=%%h
+    powershell -Command "$pw = $env:INSTALL_PASSWORD; $pw | python -c \"import sys,crypt; pw=sys.stdin.readline^(^).strip^(^); print^(crypt.crypt^(pw,crypt.mksalt^(crypt.METHOD_SHA512^)^)^)\"" > "%TEMP%\pwhash.tmp" 2>nul
+    if exist "%TEMP%\pwhash.tmp" (
+        set /p PASSWORD_HASH=<"%TEMP%\pwhash.tmp"
+        del "%TEMP%\pwhash.tmp" 2>nul
+    )
+)
+:: Fallback to WSL openssl (password via stdin, tr -d \r strips Windows CRLF)
+if "!PASSWORD_HASH!"=="" (
+    powershell -Command "$pw = $env:INSTALL_PASSWORD; $pw | wsl bash -c \"tr -d \\r ^| openssl passwd -6 -stdin\"" > "%TEMP%\pwhash.tmp" 2>nul
+    if exist "%TEMP%\pwhash.tmp" (
+        set /p PASSWORD_HASH=<"%TEMP%\pwhash.tmp"
+        del "%TEMP%\pwhash.tmp" 2>nul
+    )
 )
 :: Fallback to WSL mkpasswd
 if "!PASSWORD_HASH!"=="" (
-    for /f "tokens=*" %%h in ('powershell -Command "$pw = $env:INSTALL_PW_TEMP; $pw | wsl mkpasswd --method=SHA-512 --stdin" 2^>nul') do set PASSWORD_HASH=%%h
+    powershell -Command "$pw = $env:INSTALL_PASSWORD; $pw | wsl bash -c \"tr -d \\r ^| mkpasswd --method=SHA-512 --stdin\"" > "%TEMP%\pwhash.tmp" 2>nul
+    if exist "%TEMP%\pwhash.tmp" (
+        set /p PASSWORD_HASH=<"%TEMP%\pwhash.tmp"
+        del "%TEMP%\pwhash.tmp" 2>nul
+    )
 )
 :: Error if none worked
 if "!PASSWORD_HASH!"=="" (
@@ -428,7 +443,6 @@ if "!PASSWORD_HASH!"=="" (
     exit /b 1
 )
 :: Clear plaintext password from environment (hash is the only value needed from here)
-set "INSTALL_PW_TEMP="
 set "INSTALL_PASSWORD="
 
 :: Apply defaults for optional template variables not defined in .env
@@ -446,23 +460,30 @@ if not exist "autoinstall\user-data" (
 :: Copy the template from autoinstall directory
 copy "autoinstall\user-data" "!USB_LETTER!:\autoinstall\user-data" >nul
 
-:: Substitute variables in user-data using PowerShell
-:: All values passed via $env: to avoid cmd.exe delayed expansion corrupting ! and $ characters
-:: $ErrorActionPreference='Stop' ensures any error halts execution before WriteAllText
-powershell -Command "$ErrorActionPreference='Stop'; $c = Get-Content '!USB_LETTER!:\autoinstall\user-data' -Raw; $c = $c -replace '\$\{LOCALE:-[^}]+\}', $env:LOCALE; $c = $c -replace '\$\{KEYBOARD_LAYOUT:-[^}]+\}', $env:KEYBOARD_LAYOUT; $c = $c -replace '\$\{INSTALL_HOSTNAME:-[^}]+\}', $env:INSTALL_HOSTNAME; $c = $c -replace '\$\{INSTALL_USERNAME:-[^}]+\}', $env:INSTALL_USERNAME; $c = $c.Replace('${PASSWORD_HASH}', $env:PASSWORD_HASH); $c = $c -replace '\$\{TIMEZONE:-[^}]+\}', $env:TIMEZONE; [System.IO.File]::WriteAllText('!USB_LETTER!:\autoinstall\user-data', $c)"
-if errorlevel 1 (
-    echo ERROR: Failed to substitute variables in user-data template.
-    pause
-    exit /b 1
-)
-:: Verify no unsubstituted template variables remain in user-data
-powershell -Command "if ((Get-Content '!USB_LETTER!:\autoinstall\user-data' -Raw) -match '\$\{[A-Z_]+') { Write-Host 'ERROR: Unsubstituted template variables remain in user-data'; exit 1 }"
+:: Substitute variables in user-data using a temporary PowerShell script
+:: Script file avoids cmd.exe command-line parsing issues with long inline PowerShell
+:: All values read via $env: to avoid delayed expansion corrupting ! and $ characters
+>"%TEMP%\subst-vars.ps1" echo $ErrorActionPreference = 'Stop'
+>>"%TEMP%\subst-vars.ps1" echo $file = $args[0]
+>>"%TEMP%\subst-vars.ps1" echo $c = Get-Content $file -Raw
+>>"%TEMP%\subst-vars.ps1" echo $c = $c -replace '\$\{LOCALE:-[^^}]+\}', $env:LOCALE
+>>"%TEMP%\subst-vars.ps1" echo $c = $c -replace '\$\{KEYBOARD_LAYOUT:-[^^}]+\}', $env:KEYBOARD_LAYOUT
+>>"%TEMP%\subst-vars.ps1" echo $c = $c -replace '\$\{INSTALL_HOSTNAME:-[^^}]+\}', $env:INSTALL_HOSTNAME
+>>"%TEMP%\subst-vars.ps1" echo $c = $c -replace '\$\{INSTALL_USERNAME:-[^^}]+\}', $env:INSTALL_USERNAME
+>>"%TEMP%\subst-vars.ps1" echo $c = $c.Replace('${PASSWORD_HASH}', $env:PASSWORD_HASH)
+>>"%TEMP%\subst-vars.ps1" echo $c = $c -replace '\$\{TIMEZONE:-[^^}]+\}', $env:TIMEZONE
+>>"%TEMP%\subst-vars.ps1" echo [System.IO.File]::WriteAllText($file, $c)
+>>"%TEMP%\subst-vars.ps1" echo $verify = [System.IO.File]::ReadAllText($file)
+>>"%TEMP%\subst-vars.ps1" echo if ($verify -match '\$\{[A-Z_]+') { $m = [regex]::Matches($verify, '\$\{[A-Z_]+[^^}]*\}'); foreach ($x in $m) { Write-Host ('  Unsubstituted: ' + $x.Value) }; exit 1 }
+powershell -ExecutionPolicy Bypass -File "%TEMP%\subst-vars.ps1" "!USB_LETTER!:\autoinstall\user-data"
 if errorlevel 1 (
     echo ERROR: user-data still contains unsubstituted template variables.
     echo Please verify your .env file contains all required settings.
+    del "%TEMP%\subst-vars.ps1" 2>nul
     pause
     exit /b 1
 )
+del "%TEMP%\subst-vars.ps1" 2>nul
 echo User-data template copied and configured.
 
 :: Generate unique instance-id per USB creation
