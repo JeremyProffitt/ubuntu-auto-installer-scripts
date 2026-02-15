@@ -6,35 +6,16 @@ autoinstall:
   interactive-sections: []
 
   # Early commands run before installation (in live environment)
+  # Complex logic externalized to early-setup.sh to avoid YAML block scalar parsing issues
   early-commands:
-    # Log installation start time
-    - echo "=== Ubuntu Auto-Install Started: $(date) ===" | tee /run/install-start.log
-    # Check SMART health on all disks and log results (non-blocking)
-    - |
-      echo "=== Disk Health Check ===" | tee /run/disk-health.log
-      for disk in /dev/sd? /dev/nvme?n1; do
-        if [ -e "$disk" ]; then
-          echo "Checking $disk..." | tee -a /run/disk-health.log
-          smartctl -H "$disk" 2>/dev/null | tee -a /run/disk-health.log || echo "SMART not supported on $disk" | tee -a /run/disk-health.log
-        fi
-      done
-      echo "=== Health Check Complete ===" | tee -a /run/disk-health.log
-    # Ensure network is available
-    - |
-      echo "Waiting for network..."
-      for i in $(seq 1 30); do
-        if ping -c 1 8.8.8.8 >/dev/null 2>&1; then
-          echo "Network available"
-          break
-        fi
-        sleep 2
-      done
+    - [/bin/bash, /cdrom/scripts/early-setup.sh]
 
   # Fully automated - use smallest SSD available
   # This avoids accidentally installing on large data/HDD drives
   storage:
     layout:
       name: lvm
+      sizing-policy: all
       match:
         size: smallest
         ssd: true
@@ -59,12 +40,15 @@ autoinstall:
     authorized-keys: []
 
   # Network - DHCP by default
+  # NOTE: On Dell systems with iDRAC in "shared" NIC mode, the "en*" pattern
+  # will also configure the management interface. Set iDRAC to "Dedicated" NIC
+  # mode in BIOS if deploying on a network with a separate management VLAN.
   network:
     version: 2
     ethernets:
       id0:
         match:
-          driver: "*"
+          name: "en*"
         dhcp4: true
         dhcp6: true
 
@@ -75,7 +59,7 @@ autoinstall:
   apt:
     primary:
       - arches: [default]
-        uri: http://archive.ubuntu.com/ubuntu
+        uri: https://archive.ubuntu.com/ubuntu
     geoip: true
 
   # Packages to install during installation
@@ -106,7 +90,6 @@ autoinstall:
     - parted
     - gdisk
     - ntfs-3g
-    - exfat-fuse
     - exfatprogs
 
     # System utilities
@@ -124,17 +107,22 @@ autoinstall:
     - i2c-tools
     - fancontrol
 
-    # Power management
-    - thermald
+    # Power management (thermald installed conditionally by install-drivers.sh based on socket count)
     - powertop
+
+    # IPMI, RAID, and NUMA packages installed conditionally by install-drivers.sh
+    # based on detected hardware (Dell T7910, etc.)
+    - sg3-utils
 
     # Audio (always install for compatibility)
     - alsa-utils
-    - alsa-base
 
     # USB utilities
     - usbutils
     - pciutils
+
+    # GPU driver detection
+    - ubuntu-drivers-common
 
     # Firmware update daemon
     - fwupd
@@ -164,37 +152,56 @@ autoinstall:
 
     # Copy configuration
     - cp /cdrom/scripts/config.env /target/opt/ubuntu-installer/config.env 2>/dev/null || true
+    - chmod 600 /target/opt/ubuntu-installer/config.env 2>/dev/null || true
+    - chown root:root /target/opt/ubuntu-installer/config.env 2>/dev/null || true
+
+    # Blacklist nouveau before first boot (prevents conflict with NVIDIA proprietary driver)
+    - |
+      cat > /target/etc/modprobe.d/blacklist-nouveau.conf << 'EOF'
+      blacklist nouveau
+      options nouveau modeset=0
+      EOF
+    - sed -i 's/^[[:space:]]*//' /target/etc/modprobe.d/blacklist-nouveau.conf
 
     # Create systemd service for first-boot setup (unattended mode)
     - |
       cat > /target/etc/systemd/system/first-boot-setup.service << 'EOF'
       [Unit]
       Description=First Boot Setup - Install Drivers and Configure System
-      After=network-online.target
+      After=network-online.target local-fs.target
       Wants=network-online.target
+      RequiresMountsFor=/opt/ubuntu-installer-scripts
       ConditionPathExists=/opt/ubuntu-installer-scripts/post-install.sh
+      ConditionPathExists=!/var/log/install-complete
+      StartLimitBurst=3
+      StartLimitIntervalSec=3600
 
       [Service]
       Type=oneshot
       ExecStart=/opt/ubuntu-installer-scripts/post-install.sh --unattended
-      ExecStartPost=/bin/systemctl disable first-boot-setup.service
-      RemainAfterExit=yes
+      ExecStartPost=/bin/sh -c 'test -f /var/log/install-complete && systemctl disable first-boot-setup.service || true'
+      RemainAfterExit=no
       StandardInput=null
       StandardOutput=journal+console
       StandardError=journal+console
-      TimeoutStartSec=1800
+      TimeoutStartSec=7200
+      Restart=on-failure
+      RestartSec=60
 
       [Install]
       WantedBy=multi-user.target
       EOF
+    - sed -i 's/^[[:space:]]*//' /target/etc/systemd/system/first-boot-setup.service
     - curtin in-target --target=/target -- systemctl enable first-boot-setup.service
 
     # Enable SSH
     - curtin in-target --target=/target -- systemctl enable ssh
 
     # Prevent GRUB from probing/modifying other disks (protects USB boot drive)
-    - echo "GRUB_DISABLE_OS_PROBER=true" >> /target/etc/default/grub
-    - echo "GRUB_FORCE_PARTUUID=" >> /target/etc/default/grub
+    - grep -q "^GRUB_DISABLE_OS_PROBER=true" /target/etc/default/grub 2>/dev/null || echo "GRUB_DISABLE_OS_PROBER=true" >> /target/etc/default/grub
+
+    # Set GRUB recordfail timeout so headless/SOL systems don't wait forever after a failed boot
+    - grep -q "^GRUB_RECORDFAIL_TIMEOUT=" /target/etc/default/grub 2>/dev/null || echo "GRUB_RECORDFAIL_TIMEOUT=30" >> /target/etc/default/grub
 
     # Update GRUB with the new settings
     - curtin in-target --target=/target -- update-grub

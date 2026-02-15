@@ -20,6 +20,11 @@ START_TIME=$(date +%s)
 # Ensure log directory exists
 mkdir -p /var/log
 
+# Set explicit permissions on log files
+touch "$LOG_FILE" "$ERROR_LOG"
+chmod 640 "$LOG_FILE" "$ERROR_LOG"
+chown root:adm "$LOG_FILE" "$ERROR_LOG"
+
 # Initialize error log
 echo "=== Post-Install Errors ===" > "$ERROR_LOG"
 echo "Started: $(date)" >> "$ERROR_LOG"
@@ -35,6 +40,7 @@ echo "=========================================="
 # Track success/failure of each step
 declare -A STEP_STATUS
 CRITICAL_FAILURE=false
+REPORT_GENERATED=false
 
 # ============================================================================
 # PARSE ARGUMENTS AND LOAD CONFIG
@@ -53,7 +59,27 @@ done
 CONFIG_FILE="/opt/ubuntu-installer/config.env"
 
 if [ -f "$CONFIG_FILE" ]; then
-    source "$CONFIG_FILE"
+    while IFS='=' read -r key value; do
+        # Skip comments and empty lines
+        [[ "$key" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "$key" ]] && continue
+        # Strip whitespace using parameter expansion (safe for special characters)
+        key="${key#"${key%%[![:space:]]*}"}"
+        key="${key%"${key##*[![:space:]]}"}"
+        value="${value#"${value%%[![:space:]]*}"}"
+        value="${value%"${value##*[![:space:]]}"}"
+        # Only allow safe variable names
+        if [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; then
+            # Reject dangerous environment variables
+            case "$key" in
+                PATH|LD_PRELOAD|LD_LIBRARY_PATH|LD_AUDIT|LD_DEBUG_OUTPUT|HOME|SHELL|USER|IFS|TERM|LANG|PS1|ENV|BASH_ENV|PROMPT_COMMAND|CDPATH|GLOBIGNORE|PYTHONPATH|PYTHONSTARTUP|NODE_OPTIONS|NODE_PATH|HISTFILE)
+                    echo "[WARN] Ignoring dangerous variable from config: $key"
+                    continue
+                    ;;
+            esac
+            export "$key=$value"
+        fi
+    done < "$CONFIG_FILE"
     echo "Loaded configuration from $CONFIG_FILE"
 else
     echo "Warning: Configuration file not found, using defaults"
@@ -117,12 +143,11 @@ retry_command() {
     local max_attempts=$1
     local delay=$2
     shift 2
-    local cmd="$@"
     local attempt=1
 
     while [ $attempt -le $max_attempts ]; do
-        log_info "Attempt $attempt/$max_attempts: $cmd"
-        if eval "$cmd"; then
+        log_info "Attempt $attempt/$max_attempts: $*"
+        if "$@"; then
             return 0
         fi
         log_warn "Attempt $attempt failed, waiting ${delay}s before retry..."
@@ -131,7 +156,7 @@ retry_command() {
         attempt=$((attempt + 1))
     done
 
-    log_error "Command failed after $max_attempts attempts: $cmd"
+    log_error "Command failed after $max_attempts attempts: $*"
     return 1
 }
 
@@ -141,10 +166,16 @@ apt_retry() {
     local attempt=1
 
     while [ $attempt -le $max_attempts ]; do
-        # Wait for apt locks to be released
+        # Wait for apt locks to be released (max 5 minutes)
+        local lock_wait=0
         while fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || \
               fuser /var/lib/apt/lists/lock >/dev/null 2>&1 || \
               fuser /var/cache/apt/archives/lock >/dev/null 2>&1; do
+            lock_wait=$((lock_wait + 1))
+            if [ $lock_wait -ge 60 ]; then
+                log_warn "Apt locks still held after 5+ minutes - skipping this attempt"
+                continue 2
+            fi
             log_info "Waiting for apt locks to be released..."
             sleep 5
         done
@@ -210,12 +241,44 @@ send_webhook() {
         return 0
     fi
 
+    # Validate webhook URL scheme (prevent SSRF via file://, ftp://, etc.)
+    case "$WEBHOOK_URL" in
+        https://*) ;; # preferred
+        http://*)
+            log_warn "Webhook URL uses HTTP (not HTTPS) - notification data will be sent unencrypted"
+            ;;
+        *)
+            log_error "Webhook URL must use http:// or https:// scheme - skipping notification"
+            return 0
+            ;;
+    esac
+
     local hostname=$(hostname)
     local ip_addr=$(ip -4 addr show | grep -oP '(?<=inet\s)\d+(\.\d+){3}' | grep -v '127.0.0.1' | head -1)
     local end_time=$(date +%s)
+    [ -z "$START_TIME" ] && START_TIME=0
     local duration=$((end_time - START_TIME))
 
-    local payload=$(cat <<EOF
+    local payload
+    # Use jq for safe JSON construction if available, otherwise escape manually
+    if command -v jq &>/dev/null; then
+        payload=$(jq -n \
+            --arg status "$status" \
+            --arg hostname "$hostname" \
+            --arg ip "$ip_addr" \
+            --arg message "$message" \
+            --argjson duration "$duration" \
+            --arg ts "$(date -Iseconds)" \
+            '{status: $status, hostname: $hostname, ip_address: $ip, message: $message, duration_seconds: $duration, timestamp: $ts}')
+    else
+        # Escape backslashes, double quotes, and control characters for JSON
+        local json_escape='s/\\/\\\\/g; s/"/\\"/g; s/\t/\\t/g; s/\r/\\r/g'
+        hostname=$(echo "$hostname" | tr -d '\n' | sed "$json_escape")
+        message=$(echo "$message" | tr -d '\n' | sed "$json_escape")
+        status=$(echo "$status" | tr -d '\n' | sed "$json_escape")
+        ip_addr=$(echo "$ip_addr" | tr -d '\n' | sed "$json_escape")
+
+        payload=$(cat <<EOF
 {
     "status": "$status",
     "hostname": "$hostname",
@@ -226,12 +289,26 @@ send_webhook() {
 }
 EOF
 )
+    fi
 
-    log_info "Sending webhook notification to $WEBHOOK_URL"
-    if curl -s -X POST -H "Content-Type: application/json" -d "$payload" "$WEBHOOK_URL" --max-time 30; then
+    # Redact webhook URL in logs to avoid leaking tokens
+    # Redact credentials and path-embedded tokens (e.g., Slack/Discord webhook tokens)
+    local redacted_url
+    redacted_url=$(echo "$WEBHOOK_URL" | sed 's|://[^@]*@|://***@|; s|\?.*|?***|; s|\(https\{0,1\}://[^/]*/[^/]*/\).*|\1***|')
+    log_info "Sending webhook notification to $redacted_url"
+    local webhook_sent=false
+    for i in 1 2 3; do
+        if curl -sf -X POST -H "Content-Type: application/json" -d "$payload" "$WEBHOOK_URL" --max-time 30; then
+            webhook_sent=true
+            break
+        fi
+        log_warn "Webhook attempt $i failed, retrying in $((i * 5))s..."
+        sleep $((i * 5))
+    done
+    if [ "$webhook_sent" = true ]; then
         log_info "Webhook notification sent successfully"
     else
-        log_warn "Failed to send webhook notification"
+        log_warn "Failed to send webhook notification after 3 attempts"
     fi
 }
 
@@ -257,24 +334,8 @@ configure_log_rotation() {
 }
 EOF
 
-    # Also configure general system log rotation for reliability
-    cat > /etc/logrotate.d/ubuntu-installer-system << 'EOF'
-/var/log/syslog
-/var/log/kern.log
-/var/log/auth.log
-{
-    daily
-    rotate 7
-    nocompress
-    missingok
-    notifempty
-    create 0640 syslog adm
-    sharedscripts
-    postrotate
-        /usr/lib/rsyslog/rsyslog-rotate 2>/dev/null || true
-    endscript
-}
-
+    # Configure dpkg/apt log rotation (syslog/kern/auth managed by rsyslog default)
+    cat > /etc/logrotate.d/ubuntu-installer-apt << 'EOF'
 /var/log/dpkg.log
 /var/log/apt/history.log
 /var/log/apt/term.log
@@ -315,26 +376,48 @@ configure_ssh() {
     systemctl enable ssh 2>/dev/null || true
     systemctl start ssh 2>/dev/null || true
 
-    cat > /etc/ssh/sshd_config.d/99-ubuntu-installer.conf << 'EOF'
-# Ubuntu Auto Installer SSH Configuration
-PasswordAuthentication yes
-PubkeyAuthentication yes
-PermitRootLogin prohibit-password
-X11Forwarding yes
-ClientAliveInterval 60
-ClientAliveCountMax 3
-EOF
+    # Skip base SSH config if hardening config already exists (from install-optional-features.sh)
+    # OpenSSH uses first-match semantics: 50-* takes precedence over 99-*, so avoid conflicting settings
+    if [ -f /etc/ssh/sshd_config.d/99-hardening.conf ]; then
+        log_info "SSH hardening config already in place - skipping base configuration"
+        record_step "ssh" "SUCCESS"
+        return 0
+    fi
 
+    # Deploy SSH keys first, then decide whether to disable password auth
+    local password_auth="yes"
     if [ -n "${SSH_AUTHORIZED_KEYS:-}" ]; then
         log_info "Adding SSH authorized keys..."
         INSTALL_USERNAME="${INSTALL_USERNAME:-admin}"
-        USER_HOME=$(eval echo ~$INSTALL_USERNAME)
+        USER_HOME=$(getent passwd "$INSTALL_USERNAME" | cut -d: -f6)
+        [ -z "$USER_HOME" ] && USER_HOME="/home/$INSTALL_USERNAME"
         mkdir -p "$USER_HOME/.ssh"
-        echo "$SSH_AUTHORIZED_KEYS" >> "$USER_HOME/.ssh/authorized_keys"
+        while IFS= read -r key_line; do
+            [ -z "$key_line" ] && continue
+            if ! grep -qF "$key_line" "$USER_HOME/.ssh/authorized_keys" 2>/dev/null; then
+                echo "$key_line" >> "$USER_HOME/.ssh/authorized_keys"
+            fi
+        done <<< "$SSH_AUTHORIZED_KEYS"
         chmod 700 "$USER_HOME/.ssh"
         chmod 600 "$USER_HOME/.ssh/authorized_keys"
         chown -R "$INSTALL_USERNAME:$INSTALL_USERNAME" "$USER_HOME/.ssh"
+        # Only disable password auth if keys were actually written
+        if [ -s "$USER_HOME/.ssh/authorized_keys" ]; then
+            password_auth="no"
+        else
+            log_warn "SSH keys configured but authorized_keys is empty - keeping password auth enabled"
+        fi
     fi
+
+    cat > /etc/ssh/sshd_config.d/50-ubuntu-installer.conf << EOF
+# Ubuntu Auto Installer SSH Configuration
+PasswordAuthentication $password_auth
+PubkeyAuthentication yes
+PermitRootLogin no
+X11Forwarding no
+ClientAliveInterval 60
+ClientAliveCountMax 3
+EOF
 
     systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
 
@@ -353,9 +436,43 @@ configure_network() {
     if [ "${STATIC_IP:-false}" = "true" ]; then
         log_info "Configuring static IP: ${IP_ADDRESS:-not set}"
 
-        IFACE=$(ip -o link show | awk -F': ' '$2 !~ /^(lo|docker|veth|br-)/ {print $2; exit}')
+        # Validate network config values to prevent YAML injection
+        local ip_val="${IP_ADDRESS:-192.168.1.100}"
+        local mask_val="${NETMASK:-24}"
+        local gw_val="${GATEWAY:-192.168.1.1}"
+        local dns_val="${DNS_SERVERS:-8.8.8.8,8.8.4.4}"
+
+        if ! echo "$ip_val" | grep -qP '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$'; then
+            log_error "Invalid IP_ADDRESS format: $ip_val"
+            record_step "static_ip" "FAILED"
+            return
+        fi
+        if ! echo "$gw_val" | grep -qP '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$'; then
+            log_error "Invalid GATEWAY format: $gw_val"
+            record_step "static_ip" "FAILED"
+            return
+        fi
+        # Validate CIDR prefix
+        if ! echo "$mask_val" | grep -qP '^\d{1,2}$' || [ "$mask_val" -lt 1 ] || [ "$mask_val" -gt 32 ]; then
+            log_error "Invalid CIDR prefix: $mask_val (must be 1-32)"
+            record_step "static_ip" "FAILED"
+            return
+        fi
+        # Validate DNS servers (comma-separated IPs)
+        for dns_entry in $(echo "$dns_val" | tr ',' ' '); do
+            if ! echo "$dns_entry" | grep -qP '^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$'; then
+                log_error "Invalid DNS server: $dns_entry"
+                record_step "static_ip" "FAILED"
+                return
+            fi
+        done
+
+        IFACE=$(ip -o link show | awk -F': ' '$2 !~ /^(lo|docker|veth|br-|virbr|wl|tun|tap|zt|tailscale)/ {print $2; exit}')
 
         if [ -n "$IFACE" ]; then
+            # Format DNS list for proper YAML (comma-space separated)
+            local dns_yaml
+            dns_yaml=$(echo "$dns_val" | sed 's/,/, /g')
             cat > /etc/netplan/01-static-config.yaml << EOF
 network:
   version: 2
@@ -364,16 +481,42 @@ network:
     $IFACE:
       dhcp4: false
       addresses:
-        - ${IP_ADDRESS:-192.168.1.100}/${NETMASK:-24}
+        - ${ip_val}/${mask_val}
       routes:
         - to: default
-          via: ${GATEWAY:-192.168.1.1}
+          via: ${gw_val}
       nameservers:
-        addresses: [${DNS_SERVERS:-8.8.8.8,8.8.4.4}]
+        addresses: [${dns_yaml}]
 EOF
+            chmod 600 /etc/netplan/01-static-config.yaml
+            # Backup installer's DHCP config before removing (restore on failure)
+            if [ -f /etc/netplan/00-installer-config.yaml ]; then
+                cp /etc/netplan/00-installer-config.yaml /etc/netplan/00-installer-config.yaml.bak
+            fi
+            rm -f /etc/netplan/00-installer-config.yaml 2>/dev/null || true
             netplan apply 2>/dev/null || true
-            record_step "static_ip" "SUCCESS"
-            log_info "Static IP configured on $IFACE"
+            # Verify connectivity after applying netplan (multiple retries for slow interfaces)
+            local net_verify_ok=false
+            for _i in 1 2 3; do
+                sleep 5
+                if ping -c 1 -W 5 "$gw_val" &>/dev/null; then
+                    net_verify_ok=true
+                    break
+                fi
+            done
+            if [ "$net_verify_ok" = true ]; then
+                log_info "Network connectivity verified (gateway reachable)"
+                rm -f /etc/netplan/00-installer-config.yaml.bak
+                record_step "static_ip" "SUCCESS"
+            else
+                log_warn "Gateway $gw_val not reachable after netplan apply - restoring DHCP config"
+                rm -f /etc/netplan/01-static-config.yaml
+                if [ -f /etc/netplan/00-installer-config.yaml.bak ]; then
+                    mv /etc/netplan/00-installer-config.yaml.bak /etc/netplan/00-installer-config.yaml
+                    netplan apply 2>/dev/null || true
+                fi
+                record_step "static_ip" "PARTIAL"
+            fi
         else
             record_step "static_ip" "FAILED"
             log_warn "Could not detect network interface for static IP"
@@ -388,12 +531,54 @@ configure_timezone() {
     log_step "Configuring timezone..."
     TIMEZONE="${TIMEZONE:-America/New_York}"
 
+    # Validate timezone format to prevent injection (must be Region/City pattern, allows digits/hyphens for Etc/GMT+5 etc.)
+    if ! echo "$TIMEZONE" | grep -qP '^[A-Za-z_][A-Za-z0-9_+-]+/[A-Za-z0-9_+-]+(/[A-Za-z0-9_+-]+)?$'; then
+        log_warn "Invalid TIMEZONE format: $TIMEZONE - using default America/New_York"
+        TIMEZONE="America/New_York"
+    fi
+
     if timedatectl set-timezone "$TIMEZONE" 2>/dev/null; then
         record_step "timezone" "SUCCESS"
         log_info "Timezone set to $TIMEZONE"
     else
         record_step "timezone" "FAILED"
         log_warn "Failed to set timezone"
+    fi
+}
+
+configure_tmpfs_tmp() {
+    if [ "${ENABLE_TMPFS_TMP:-false}" != "true" ]; then
+        record_step "tmpfs_tmp" "SKIPPED"
+        return 0
+    fi
+
+    log_step "Configuring tmpfs for /tmp..."
+
+    local size="${TMPFS_TMP_SIZE:-50%}"
+
+    # Validate size (e.g., 50%, 4G, 2048M)
+    if ! echo "$size" | grep -qP '^[0-9]+(%|[GgMmKk])?$'; then
+        log_warn "Invalid TMPFS_TMP_SIZE: $size - using default 50%"
+        size="50%"
+    fi
+
+    # Create systemd drop-in to configure tmp.mount with desired size
+    mkdir -p /etc/systemd/system/tmp.mount.d
+    cat > /etc/systemd/system/tmp.mount.d/size.conf << EOF
+[Mount]
+Options=mode=1777,strictatime,nosuid,nodev,size=${size}
+EOF
+
+    systemctl daemon-reload
+
+    if systemctl enable tmp.mount && systemctl start tmp.mount 2>/dev/null; then
+        record_step "tmpfs_tmp" "SUCCESS"
+        log_info "tmpfs /tmp enabled (size cap: ${size})"
+    else
+        # tmp.mount may fail to start if /tmp is in use; will activate on next boot
+        systemctl enable tmp.mount 2>/dev/null
+        record_step "tmpfs_tmp" "PARTIAL"
+        log_warn "tmpfs /tmp enabled but will activate on next reboot (/tmp currently in use)"
     fi
 }
 
@@ -545,7 +730,22 @@ install_extra_packages() {
     if [ -n "${EXTRA_PACKAGES:-}" ]; then
         log_step "Installing extra packages: $EXTRA_PACKAGES"
 
-        PACKAGES=$(echo "$EXTRA_PACKAGES" | tr ',' ' ')
+        # Validate package names (alphanumeric, hyphens, dots, plus signs only)
+        PACKAGES=""
+        for pkg in $(echo "$EXTRA_PACKAGES" | tr ',' ' '); do
+            if echo "$pkg" | grep -qP '^[a-zA-Z0-9][a-zA-Z0-9.+\-]+$'; then
+                PACKAGES="$PACKAGES $pkg"
+            else
+                log_warn "Skipping invalid package name: $pkg"
+            fi
+        done
+        PACKAGES=$(echo "$PACKAGES" | xargs)  # trim whitespace
+
+        if [ -z "$PACKAGES" ]; then
+            log_warn "No valid packages to install"
+            record_step "extra_packages" "SKIPPED"
+            return
+        fi
 
         if apt_retry update && apt_retry install $PACKAGES; then
             record_step "extra_packages" "SUCCESS"
@@ -587,6 +787,12 @@ final_updates() {
 # ============================================================================
 
 generate_status_report() {
+    # Guard against re-entrancy (trap handler calling this while already running)
+    if [ "$REPORT_GENERATED" = true ]; then
+        return 0
+    fi
+    REPORT_GENERATED=true
+
     log_step "Generating status report..."
 
     local end_time=$(date +%s)
@@ -621,8 +827,10 @@ generate_status_report() {
         overall_status="FAILED"
     fi
 
-    # Write status file
-    cat > "$STATUS_FILE" << EOF
+    # Write status report to a temporary file first;
+    # STATUS_FILE is only created on success (so ConditionPathExists retry works)
+    local report_file="/var/log/install-report"
+    cat > "$report_file" << EOF
 ========================================
 Ubuntu Auto-Install Complete
 ========================================
@@ -639,10 +847,10 @@ Step Results:
 EOF
 
     for step in "${!STEP_STATUS[@]}"; do
-        printf "  %-25s %s\n" "$step:" "${STEP_STATUS[$step]}" >> "$STATUS_FILE"
+        printf "  %-25s %s\n" "$step:" "${STEP_STATUS[$step]}" >> "$report_file"
     done
 
-    cat >> "$STATUS_FILE" << EOF
+    cat >> "$report_file" << EOF
 
 Summary:
   Successful: $success_count
@@ -656,7 +864,14 @@ Log files:
 EOF
 
     # Display to console
-    cat "$STATUS_FILE"
+    cat "$report_file"
+
+    # Only create STATUS_FILE on success (so first-boot systemd ConditionPathExists retry works)
+    if [ "$overall_status" != "FAILED" ]; then
+        cp "$report_file" "$STATUS_FILE"
+    else
+        log_warn "Installation FAILED - $STATUS_FILE NOT created so first-boot service will retry"
+    fi
 
     # Send webhook notification
     local webhook_message="Installation completed on $hostname ($ip_addr). Status: $overall_status. Duration: ${duration_min}m ${duration_sec}s"
@@ -682,7 +897,7 @@ display_system_info() {
     # SMART health summary
     if command -v smartctl &>/dev/null; then
         echo "Disk Health:"
-        for disk in /dev/sd? /dev/nvme?n1; do
+        for disk in /dev/sd[a-z] /dev/sd[a-z][a-z] /dev/nvme*n1; do
             if [ -e "$disk" ]; then
                 health=$(smartctl -H "$disk" 2>/dev/null | grep -i "SMART overall-health" | awk -F: '{print $2}' | xargs)
                 [ -n "$health" ] && echo "  $disk: $health"
@@ -701,8 +916,24 @@ display_system_info() {
 # ============================================================================
 
 main() {
+    # Idempotency guard: skip if already completed
+    if [ -f "/var/log/install-complete" ]; then
+        echo "Post-install already completed. Remove /var/log/install-complete to re-run."
+        exit 0
+    fi
+
     log_info "Starting post-installation setup..."
     log_info "Installation ID: $(cat /etc/machine-id 2>/dev/null || echo 'unknown')"
+
+    # Check available disk space before installing potentially GBs of software
+    local avail_mb
+    avail_mb=$(df --output=avail -BM / 2>/dev/null | tail -1 | tr -d ' M')
+    if [ -n "$avail_mb" ] && [ "$avail_mb" -lt 3000 ] 2>/dev/null; then
+        log_error "Less than 3GB available on root filesystem (${avail_mb}MB). Installations may fail."
+        log_error "Consider using a larger disk or reducing optional features."
+    elif [ -n "$avail_mb" ] && [ "$avail_mb" -lt 5000 ] 2>/dev/null; then
+        log_warn "Less than 5GB available on root filesystem (${avail_mb}MB). Large feature sets (GUI, dev tools) may fail."
+    fi
 
     # Configure log rotation early to manage disk space
     configure_log_rotation
@@ -714,6 +945,7 @@ main() {
     configure_ssh
     configure_network
     configure_timezone
+    configure_tmpfs_tmp
 
     # Driver and hardware setup
     install_drivers
@@ -753,4 +985,19 @@ trap 'log_error "Script interrupted"; generate_status_report; exit 1' INT TERM
 
 main "$@"
 
+# Reset trap to prevent race between trap and exit-code computation
+trap - INT TERM
+
+# Propagate failure exit code so systemd Restart=on-failure works correctly
+# Count failures from the status report
+_failed=0
+for _step in "${!STEP_STATUS[@]}"; do
+    [ "${STEP_STATUS[$_step]}" = "FAILED" ] && _failed=$((_failed + 1))
+done
+
+if [ "$CRITICAL_FAILURE" = true ] || [ $_failed -gt 0 ]; then
+    sleep 0.5  # Allow tee process substitution to flush final log lines
+    exit 1
+fi
+sleep 0.5  # Allow tee process substitution to flush final log lines
 exit 0

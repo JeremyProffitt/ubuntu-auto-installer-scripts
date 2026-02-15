@@ -32,6 +32,7 @@
 # OS files
 .DS_Store
 Thumbs.db
+nul
 
 # Log files
 *.log

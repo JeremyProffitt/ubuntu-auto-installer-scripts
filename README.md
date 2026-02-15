@@ -9,9 +9,11 @@ This installer is specifically designed and tested for:
 | System | Chipset | CPU Generation |
 |--------|---------|----------------|
 | HP Elite 8300 | Intel Q77 | 3rd Gen Intel (Ivy Bridge) |
+| HP EliteDesk 800 G1 SFF | Intel Q87 | 4th Gen Intel (Haswell) |
 | Lenovo ThinkCentre M92p | Intel Q77 | 3rd Gen Intel (Ivy Bridge) |
 | Lenovo ThinkCentre M72 | Intel H61 | 3rd Gen Intel (Ivy Bridge) |
 | ASUS Z97 Motherboards | Intel Z97 | 4th/5th Gen Intel (Haswell/Broadwell) |
+| Dell Precision T7910 | Intel C612 | Xeon E5 v3/v4 (Haswell-EP/Broadwell-EP) |
 | ASUS Hyper M.2 x16 Card V2 | PCIe NVMe Adapter | - |
 
 ## Features
@@ -78,7 +80,7 @@ SSH_AUTHORIZED_KEYS=            # Optional SSH public key
 # Network Configuration
 STATIC_IP=false                 # Set to true for static IP
 IP_ADDRESS=192.168.1.100       # Static IP address
-NETMASK=255.255.255.0          # Network mask
+CIDR_PREFIX=24                 # CIDR prefix length (e.g., 24 for /24)
 GATEWAY=192.168.1.1            # Default gateway
 DNS_SERVERS=8.8.8.8,8.8.4.4    # DNS servers
 
@@ -140,6 +142,14 @@ ubuntu-auto-installer-scripts/
 - Intel MEI (Management Engine)
 - TPM 1.2 support
 
+### HP EliteDesk 800 G1 SFF
+- Intel Q87 chipset support
+- Intel HD Graphics 4600 (i915)
+- Intel I217-LM Gigabit Ethernet (e1000e)
+- Realtek ALC audio (snd-hda-intel)
+- Intel MEI (Management Engine)
+- TPM 1.2/2.0 support
+
 ### Lenovo ThinkCentre M72
 - Intel H61 chipset support
 - Intel HD Graphics 2500 (i915)
@@ -154,6 +164,31 @@ ubuntu-auto-installer-scripts/
 - Broadcom BCM4352 WiFi (bcmwl)
 - Realtek ALC1150 audio
 - Nuvoton NCT6791D monitoring (nct6775)
+
+### Dell Precision T7910
+- Intel C612 (Wellsburg) chipset support
+- Dual-socket Xeon E5 v3/v4 with NUMA optimization (numad)
+- ECC memory error detection (sb_edac)
+- NVIDIA GPU drivers (auto-detected per GPU model, see below)
+- Dell PERC RAID controller support (megaraid_sas)
+- Intel I217-LM Gigabit Ethernet (e1000e)
+- IPMI / BMC out-of-band management (ipmitool, freeipmi)
+- Serial-Over-LAN (SOL) with console on both serial and monitors
+- Intel MEI (Management Engine)
+
+### NVIDIA GPU Support
+Auto-detected and configured per model:
+
+| GPU | Architecture | Driver Mode | CUDA | Notes |
+|-----|-------------|-------------|------|-------|
+| RTX 3060 | Ampere (GA106) | Full display driver | Yes | Display + compute |
+| Tesla P40 | Pascal (GP102) | Headless server driver | Yes | Compute-only, no display output |
+| Quadro series | Various | Full display driver | Yes | Workstation display + compute |
+
+- **Nouveau blacklisted** automatically when proprietary driver is installed
+- **NVIDIA persistence mode** enabled for Tesla GPUs (reduces compute init latency)
+- **CUDA toolkit** installed for RTX and Tesla GPUs
+- Mixed configurations supported (e.g., RTX 3060 for display + Tesla P40 for compute)
 
 ### ASUS Hyper M.2 x16 Card V2
 - NVMe driver configuration
@@ -307,6 +342,30 @@ After installation completes and the system reboots:
 - Verify PCIe bifurcation is enabled in BIOS
 - Check: `lspci | grep -i nvme`
 - Run: `sudo nvme list`
+
+### NVIDIA GPU Issues
+- Check driver loaded: `nvidia-smi`
+- View GPU details: `lspci -v | grep -A20 NVIDIA`
+- Tesla P40 has no display output - use another GPU or SSH for access
+- If screen is blank after install, boot to recovery and run: `sudo ubuntu-drivers autoinstall`
+- Check persistence mode: `nvidia-smi -pm 1`
+
+### Dell T7910 Serial-Over-LAN (SOL)
+The installer auto-configures GRUB and the OS for serial console on COM2 (ttyS1, 115200 baud). To use SOL, configure these BIOS settings:
+1. **Serial Communication**: On with Console Redirection via COM2
+2. **Serial Port Address**: COM2 (2F8h)
+3. **Redirection After Boot**: Enabled
+4. **External Serial Connector**: COM2
+
+Connect via SOL from another machine:
+```bash
+ipmitool -I lanplus -H <bmc-ip> -U <user> -P <pass> sol activate
+```
+
+### Dell PERC RAID Not Detected
+- Check: `lspci | grep -i megaraid`
+- Verify: `lsmod | grep megaraid_sas`
+- For full management, download perccli from dell.com/support
 
 ## Requirements
 
