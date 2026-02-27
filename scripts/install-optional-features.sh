@@ -1302,6 +1302,97 @@ EOF
     fi
 }
 
+configure_rtc_wake() {
+    if [ -z "${RTC_WAKE_TIME:-}" ]; then
+        return
+    fi
+
+    log_section "Configuring RTC Daily Wake"
+
+    # Validate time format (HH:MM, 24h)
+    if ! echo "$RTC_WAKE_TIME" | grep -qP '^([01][0-9]|2[0-3]):[0-5][0-9]$'; then
+        log_error "Invalid RTC_WAKE_TIME format: $RTC_WAKE_TIME (expected HH:MM in 24h format, e.g. 01:00)"
+        track_error
+        return
+    fi
+
+    # Verify rtcwake is available
+    if ! command -v rtcwake &>/dev/null; then
+        apt-get install -y util-linux || { track_error; return; }
+    fi
+
+    # Test that the RTC supports wake alarms
+    if [ ! -f /sys/class/rtc/rtc0/wakealarm ]; then
+        log_warn "RTC wake alarm not supported by hardware - skipping RTC wake configuration"
+        track_error
+        return
+    fi
+
+    # Create a script that sets the next wake alarm
+    cat > /usr/local/bin/rtc-set-wake << 'EOFRTC'
+#!/bin/bash
+# Set RTC wake alarm for the next occurrence of the configured time
+WAKE_TIME="$1"
+if [ -z "$WAKE_TIME" ]; then
+    echo "Usage: rtc-set-wake HH:MM" >&2
+    exit 1
+fi
+
+# Calculate next wake epoch (today or tomorrow if time already passed)
+NOW=$(date +%s)
+TARGET=$(date -d "today $WAKE_TIME" +%s 2>/dev/null)
+if [ -z "$TARGET" ] || [ "$TARGET" -le "$NOW" ]; then
+    TARGET=$(date -d "tomorrow $WAKE_TIME" +%s 2>/dev/null)
+fi
+
+if [ -n "$TARGET" ]; then
+    # Clear existing alarm and set new one
+    echo 0 > /sys/class/rtc/rtc0/wakealarm 2>/dev/null
+    echo "$TARGET" > /sys/class/rtc/rtc0/wakealarm 2>/dev/null
+    echo "RTC wake alarm set for $(date -d @"$TARGET" '+%Y-%m-%d %H:%M')"
+else
+    echo "Failed to calculate wake time" >&2
+    exit 1
+fi
+EOFRTC
+    chmod 755 /usr/local/bin/rtc-set-wake
+
+    # Create systemd service to set the wake alarm
+    cat > /etc/systemd/system/rtc-wake.service << EOF
+[Unit]
+Description=Set RTC wake alarm for ${RTC_WAKE_TIME} daily
+After=time-sync.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/rtc-set-wake ${RTC_WAKE_TIME}
+EOF
+
+    # Create systemd timer that re-arms the alarm after each wake
+    cat > /etc/systemd/system/rtc-wake.timer << 'EOF'
+[Unit]
+Description=Re-arm RTC wake alarm daily
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=12h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl daemon-reload
+    systemctl enable rtc-wake.timer
+    systemctl start rtc-wake.timer
+
+    # Set the initial wake alarm now
+    /usr/local/bin/rtc-set-wake "$RTC_WAKE_TIME" || true
+
+    log_info "RTC daily wake configured for ${RTC_WAKE_TIME}"
+    log_info "The system will automatically wake from suspend/poweroff at ${RTC_WAKE_TIME} every day"
+}
+
 configure_ntp() {
     if [ "${CONFIGURE_NTP:-true}" != "true" ]; then
         return
@@ -2003,6 +2094,7 @@ install_recommended_homelab() {
     configure_swap
     configure_zram
     configure_wakeonlan
+    configure_rtc_wake
     configure_ntp
     install_node_exporter
     install_ansible
@@ -2104,6 +2196,7 @@ main() {
     configure_swap
     configure_zram
     configure_wakeonlan
+    configure_rtc_wake
     configure_ntp
     install_common_tools
     install_dev_tools

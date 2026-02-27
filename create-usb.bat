@@ -10,7 +10,7 @@ title Ubuntu Auto Installer USB Creator
 
 echo ============================================================
 echo     Ubuntu Auto Installer USB Creator
-echo     For: HP Elite 8300, HP 800 G1, Lenovo M92p/M72, ASUS Z97, Dell T7910
+echo     For: HP Elite 8300, HP 800 G1, Lenovo M92p/M72, ASUS Z97, Dell T7910, ASUS ROG Strix
 echo ============================================================
 echo.
 
@@ -552,6 +552,7 @@ if exist "!USB_LETTER!:\autoinstall\meta-data" (
     echo INSTALL_TAILSCALE=%INSTALL_TAILSCALE%
     echo INSTALL_ZEROTIER=%INSTALL_ZEROTIER%
     echo ENABLE_WAKE_ON_LAN=%ENABLE_WAKE_ON_LAN%
+    echo RTC_WAKE_TIME=%RTC_WAKE_TIME%
     echo INSTALL_FAIL2BAN=%INSTALL_FAIL2BAN%
     echo CONFIGURE_UFW=%CONFIGURE_UFW%
     echo HARDEN_SSH=%HARDEN_SSH%
@@ -585,7 +586,7 @@ powershell -Command "$c = [System.IO.File]::ReadAllText('!USB_LETTER!:\scripts\c
 :: Modify grub.cfg to add autoinstall and set timeout for automatic boot
 echo Configuring boot loader for automatic installation...
 if exist "!USB_LETTER!:\boot\grub\grub.cfg" (
-    attrib -r "!USB_LETTER!:\boot\grub\grub.cfg"
+    attrib -r "!USB_LETTER!:\boot\grub\grub.cfg" 2>nul
 
     :: Use PowerShell to modify grub.cfg with proper escaping
     :: Add autoinstall parameters and console output for debugging
@@ -610,7 +611,7 @@ if exist "!USB_LETTER!:\boot\grub\grub.cfg" (
 
 :: Also check for loopback.cfg which some Ubuntu ISOs use
 if exist "!USB_LETTER!:\boot\grub\loopback.cfg" (
-    attrib -r "!USB_LETTER!:\boot\grub\loopback.cfg"
+    attrib -r "!USB_LETTER!:\boot\grub\loopback.cfg" 2>nul
     powershell -Command "$grub = Get-Content '!USB_LETTER!:\boot\grub\loopback.cfg' -Raw; if ($grub -notmatch 'autoinstall') { $grub = $grub -replace '(linux\s+/casper/vmlinuz[^\r\n]*)', '$1 autoinstall ds=nocloud\;s=/cdrom/autoinstall/ console=tty0' }; [System.IO.File]::WriteAllText('!USB_LETTER!:\boot\grub\loopback.cfg', $grub)"
 )
 
@@ -705,6 +706,7 @@ echo   - Lenovo ThinkCentre M72
 echo   - ASUS Z97 motherboards
 echo   - Dell Precision T7910
 echo   - ASUS Hyper M.2 x16 Card V2
+echo   - ASUS ROG Strix laptops (G733QS, etc.)
 echo.
 
 pause

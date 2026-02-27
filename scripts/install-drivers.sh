@@ -3,7 +3,8 @@
 # Ubuntu Driver Installation Script for Home Lab Computers
 # Supports: HP Elite 8300, HP EliteDesk 800 G1, Lenovo ThinkCentre M92p,
 #           Lenovo ThinkCentre M72, ASUS Z97 motherboards,
-#           ASUS Hyper M.2 x16 Card V2, Dell Precision T7910
+#           ASUS Hyper M.2 x16 Card V2, Dell Precision T7910,
+#           ASUS ROG Strix G733QS (and similar ROG laptops)
 # ============================================================================
 
 set +e
@@ -92,6 +93,7 @@ detect_hardware() {
     IS_LENOVO_M72=false
     IS_ASUS_Z97=false
     IS_DELL_T7910=false
+    IS_ASUS_ROG=false
     HAS_HYPER_M2=false
 
     if [[ "$SYSTEM_PRODUCT" == *"Elite 8300"* ]] || [[ "$SYSTEM_PRODUCT" == *"HP Compaq 8300"* ]]; then
@@ -122,6 +124,11 @@ detect_hardware() {
     if [[ "$SYSTEM_VENDOR" == *"Dell"* ]] && { [[ "$SYSTEM_PRODUCT" == *"T7910"* ]] || [[ "$SYSTEM_PRODUCT" == *"Precision Tower 7910"* ]]; }; then
         IS_DELL_T7910=true
         log_info "Detected: Dell Precision T7910"
+    fi
+
+    if [[ "$SYSTEM_VENDOR" == *"ASUSTeK"* ]] && [[ "$SYSTEM_PRODUCT" == *"ROG Strix"* ]]; then
+        IS_ASUS_ROG=true
+        log_info "Detected: ASUS ROG Strix Laptop ($SYSTEM_PRODUCT)"
     fi
 
     # Check for ASUS Hyper M.2 x16 Card V2 (multiple NVMe controllers on single slot)
@@ -459,9 +466,12 @@ install_hwmon() {
 
     # Detect sensors (capture output for audit)
     # Skip on Dell T7910: aggressive I2C probing can interfere with iDRAC BMC on shared SMBus
+    # Skip on ASUS ROG laptops: embedded controller on shared SMBus, asus-wmi provides sensor data
     if [ "$IS_DELL_T7910" = true ]; then
         log_info "Skipping sensors-detect on Dell T7910 (iDRAC SMBus conflict risk)"
         log_info "Loading known T7910 sensor modules (coretemp) only"
+    elif [ "$IS_ASUS_ROG" = true ]; then
+        log_info "Skipping sensors-detect on ASUS ROG (asus-wmi provides sensor data)"
     else
         sensors-detect --auto 2>&1 | tee /var/log/sensors-detect.log || true
         # Deduplicate /etc/modules entries (sensors-detect --auto appends on each run)
@@ -484,8 +494,11 @@ install_power_management() {
     log_info "Installing power management tools..."
 
     # Skip thermald on dual-socket systems (iDRAC/BMC handles thermal management)
+    # Skip thermald on ASUS ROG laptops (TLP handles power management, thermald conflicts)
     local socket_count=$(LANG=C lscpu | grep "Socket(s):" | awk '{print $2}')
-    if [ "${socket_count:-1}" -le 1 ]; then
+    if [ "$IS_ASUS_ROG" = true ]; then
+        log_info "ASUS ROG laptop detected - skipping thermald (TLP manages power/thermals)"
+    elif [ "${socket_count:-1}" -le 1 ]; then
         apt-get install -y thermald || true
         systemctl enable thermald 2>/dev/null || true
     else
@@ -921,6 +934,70 @@ EOF
     log_info "  - Redirection After Boot: Enabled"
 }
 
+# ASUS ROG Strix laptop specific setup (G733QS, G713, G814, etc.)
+# Handles hybrid AMD iGPU + NVIDIA dGPU, laptop power management, ASUS ACPI
+setup_asus_rog() {
+    log_info "Applying ASUS ROG Strix laptop specific configuration..."
+
+    # --- Hybrid GPU switching (AMD Radeon iGPU + NVIDIA dGPU) ---
+    # nvidia-prime enables switching between integrated and discrete GPU
+    apt-get install -y nvidia-prime || { track_error; true; }
+    log_info "NVIDIA PRIME installed for hybrid GPU switching"
+    log_info "Use: prime-select intel|nvidia|on-demand to switch GPU modes"
+
+    # --- ASUS WMI / ACPI modules for hotkeys, fan control, backlight ---
+    modprobe asus-wmi 2>/dev/null || true
+    modprobe asus-nb-wmi 2>/dev/null || true
+    cat > /etc/modules-load.d/asus-rog.conf << 'EOF'
+asus-wmi
+asus-nb-wmi
+EOF
+
+    # --- Laptop power management (TLP) ---
+    # TLP provides laptop-optimized power profiles (AC vs battery)
+    apt-get install -y tlp tlp-rdw || { track_error; true; }
+    # Disable power-profiles-daemon which conflicts with TLP on Ubuntu 24.04
+    systemctl disable power-profiles-daemon 2>/dev/null || true
+    systemctl mask power-profiles-daemon 2>/dev/null || true
+    systemctl enable tlp 2>/dev/null || true
+    systemctl start tlp 2>/dev/null || true
+    log_info "TLP power management enabled (laptop optimized)"
+
+    # --- Battery charge limit for battery health ---
+    # ASUS laptops expose charge limit via ASUS WMI sysfs interface
+    if [ -f /sys/class/power_supply/BAT0/charge_control_end_threshold ]; then
+        echo 80 > /sys/class/power_supply/BAT0/charge_control_end_threshold 2>/dev/null || true
+        log_info "Battery charge limit set to 80% for battery longevity"
+        # Persist via udev rule
+        cat > /etc/udev/rules.d/99-asus-battery-limit.rules << 'EOF'
+SUBSYSTEM=="power_supply", ATTR{type}=="Battery", ATTR{charge_control_end_threshold}="80"
+EOF
+    else
+        log_info "Battery charge limit sysfs not available (may require reboot with asus-wmi loaded)"
+    fi
+
+    # --- MediaTek WiFi (MT7921/MT7922 common in ROG laptops) ---
+    if lspci | grep -qi "MediaTek"; then
+        log_info "MediaTek WiFi detected (mt7921e driver built into kernel 5.15+)"
+        apt-get install -y linux-firmware || true
+        modprobe mt7921e 2>/dev/null || true
+    fi
+
+    # --- Display backlight control ---
+    # Ensure backlight control works for both AMD and NVIDIA
+    if ! grep -q "amdgpu.backlight" /etc/default/grub 2>/dev/null; then
+        sed -i 's/GRUB_CMDLINE_LINUX_DEFAULT="\(.*\)"/GRUB_CMDLINE_LINUX_DEFAULT="\1 amdgpu.backlight=0"/' /etc/default/grub
+        GRUB_UPDATE_NEEDED=true
+        log_info "Added amdgpu.backlight=0 (use NVIDIA backlight control for hybrid GPU)"
+    fi
+
+    log_info "ASUS ROG Strix configuration complete"
+    log_info "Hybrid GPU: Use 'prime-select' to switch GPU modes"
+    log_info "  - prime-select on-demand: iGPU by default, offload to dGPU with __NV_PRIME_RENDER_OFFLOAD=1"
+    log_info "  - prime-select nvidia: Always use NVIDIA dGPU (higher performance, more power)"
+    log_info "  - prime-select intel: Always use AMD iGPU (power saving, no NVIDIA)"
+}
+
 # Main installation routine
 main() {
     log_info "Starting driver installation..."
@@ -981,6 +1058,10 @@ main() {
 
     if [ "$IS_DELL_T7910" = true ]; then
         setup_dell_t7910
+    fi
+
+    if [ "$IS_ASUS_ROG" = true ]; then
+        setup_asus_rog
     fi
 
     if [ "$HAS_HYPER_M2" = true ]; then
