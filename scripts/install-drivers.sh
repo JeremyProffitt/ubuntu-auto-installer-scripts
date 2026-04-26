@@ -4,6 +4,7 @@
 # Supports: HP Elite 8300, HP EliteDesk 800 G1, Lenovo ThinkCentre M92p,
 #           Lenovo ThinkCentre M72, ASUS Z97 motherboards,
 #           ASUS Hyper M.2 x16 Card V2, Dell Precision T7910,
+#           Dell OptiPlex 3020, Acer Aspire TC-780,
 #           ASUS ROG Strix G733QS (and similar ROG laptops)
 # ============================================================================
 
@@ -93,6 +94,8 @@ detect_hardware() {
     IS_LENOVO_M72=false
     IS_ASUS_Z97=false
     IS_DELL_T7910=false
+    IS_DELL_3020=false
+    IS_ACER_TC780=false
     IS_ASUS_ROG=false
     HAS_HYPER_M2=false
 
@@ -124,6 +127,16 @@ detect_hardware() {
     if [[ "$SYSTEM_VENDOR" == *"Dell"* ]] && { [[ "$SYSTEM_PRODUCT" == *"T7910"* ]] || [[ "$SYSTEM_PRODUCT" == *"Precision Tower 7910"* ]]; }; then
         IS_DELL_T7910=true
         log_info "Detected: Dell Precision T7910"
+    fi
+
+    if [[ "$SYSTEM_VENDOR" == *"Dell"* ]] && [[ "$SYSTEM_PRODUCT" == *"OptiPlex 3020"* ]]; then
+        IS_DELL_3020=true
+        log_info "Detected: Dell OptiPlex 3020"
+    fi
+
+    if [[ "$SYSTEM_VENDOR" == *"Acer"* ]] && [[ "$SYSTEM_PRODUCT" == *"Aspire TC-780"* ]]; then
+        IS_ACER_TC780=true
+        log_info "Detected: Acer Aspire TC-780"
     fi
 
     if [[ "$SYSTEM_VENDOR" == *"ASUSTeK"* ]] && [[ "$SYSTEM_PRODUCT" == *"ROG Strix"* ]]; then
@@ -819,6 +832,41 @@ setup_hyper_m2() {
     done
 }
 
+# Dell OptiPlex 3020 specific setup
+setup_dell_3020() {
+    log_info "Applying Dell OptiPlex 3020 specific configuration..."
+
+    # Intel H81 (Lynx Point) chipset - SMBus
+    modprobe i2c-i801 2>/dev/null || true
+    cat > /etc/modules-load.d/dell-3020.conf << 'EOF'
+i2c-i801
+EOF
+
+    # Intel MEI
+    modprobe mei_me 2>/dev/null || true
+}
+
+# Acer Aspire TC-780 specific setup
+setup_acer_tc780() {
+    log_info "Applying Acer Aspire TC-780 specific configuration..."
+
+    # Intel B150/H110 (Sunrise Point) chipset - SMBus
+    modprobe i2c-i801 2>/dev/null || true
+    cat > /etc/modules-load.d/acer-tc780.conf << 'EOF'
+i2c-i801
+EOF
+
+    # Intel MEI
+    modprobe mei_me 2>/dev/null || true
+
+    # Intel Wireless-AC 3165 (3165NGW) - iwlwifi driver built into kernel
+    # Ensure firmware is loaded (install_intel_wifi handles this globally)
+    if lspci | grep -qi "3165"; then
+        log_info "Intel Wireless-AC 3165 detected"
+        modprobe iwlwifi 2>/dev/null || true
+    fi
+}
+
 # Dell Precision T7910 specific setup
 setup_dell_t7910() {
     log_info "Applying Dell Precision T7910 specific configuration..."
@@ -1060,6 +1108,14 @@ main() {
         setup_dell_t7910
     fi
 
+    if [ "$IS_DELL_3020" = true ]; then
+        setup_dell_3020
+    fi
+
+    if [ "$IS_ACER_TC780" = true ]; then
+        setup_acer_tc780
+    fi
+
     if [ "$IS_ASUS_ROG" = true ]; then
         setup_asus_rog
     fi
@@ -1071,7 +1127,7 @@ main() {
     # Check for firmware updates via fwupd/LVFS (informational, not auto-applied)
     # Skip on platforms too old for LVFS coverage (saves ~30s + 20MB metadata download)
     if command -v fwupdmgr &>/dev/null; then
-        if [ "$IS_HP_ELITE_8300" = true ] || [ "$IS_HP_800_G1" = true ] || [ "$IS_LENOVO_M92P" = true ] || [ "$IS_LENOVO_M72" = true ] || [ "$IS_ASUS_Z97" = true ]; then
+        if [ "$IS_HP_ELITE_8300" = true ] || [ "$IS_HP_800_G1" = true ] || [ "$IS_LENOVO_M92P" = true ] || [ "$IS_LENOVO_M72" = true ] || [ "$IS_ASUS_Z97" = true ] || [ "$IS_DELL_3020" = true ] || [ "$IS_ACER_TC780" = true ]; then
             log_info "Skipping LVFS firmware check (platform too old for LVFS coverage)"
         else
             log_info "Checking for firmware updates via fwupd/LVFS..."
