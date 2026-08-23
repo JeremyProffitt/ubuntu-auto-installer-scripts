@@ -11,7 +11,8 @@
 - `C:\dev\ubuntu-auto-installer-scripts\.env.sample` enables development tools by default and is the documented source for USB settings.
 - `C:\dev\ubuntu-auto-installer-scripts\create-usb.bat` writes optional-feature values to `/opt/ubuntu-installer/config.env` through the USB copy.
 - `C:\dev\ubuntu-auto-installer-scripts\cmd\usb-creator\main.go` has a separate configuration generator that must stay consistent with the batch creator.
-- `C:\Users\Jeremy\.config\opencode\opencode.json.bak.dg10.1787479104` identifies the user's GB10-compatible Ollama endpoint as `http://192.168.40.250:11434/v1` and model as `qwen-coder-yarn`.
+- `C:\Users\Jeremy\.config\opencode\opencode.json.bak.dg10.1787479104` identifies the user's GB10-compatible Ollama endpoint as `http://192.168.40.250:11434/v1` and model family as `qwen-coder-yarn`.
+- A live `GET http://192.168.40.250:11434/v1/models` returned HTTP 200 on 2026-08-23 and listed the exact current model ID `qwen-coder-yarn:latest`.
 - The current OpenCode 1 documentation specifies `npm install -g opencode-ai`, global configuration at `~/.config/opencode/opencode.json`, and `@ai-sdk/openai-compatible` for OpenAI-compatible endpoints.
 - `git status --short --branch` returned `## main...origin/main` plus untracked `agents.md` and `claude.md`. Those unrelated files will not be staged.
 
@@ -19,13 +20,13 @@
 
 ### Workstream A: Installer behavior
 
-[~] Add an idempotent OpenCode install and GB10 configuration function to `C:\dev\ubuntu-auto-installer-scripts\scripts\install-optional-features.sh`.
+[x] Add an idempotent OpenCode install and GB10 configuration function to `C:\dev\ubuntu-auto-installer-scripts\scripts\install-optional-features.sh`.
 
 Definition of done: `bash -n scripts/install-optional-features.sh` exits 0 and focused tests verify the install command, endpoint, model, ownership, and invocation.
 
 ### Workstream B: Configuration propagation
 
-[ ] Add documented OpenCode settings to `C:\dev\ubuntu-auto-installer-scripts\.env.sample`, `C:\dev\ubuntu-auto-installer-scripts\create-usb.bat`, and `C:\dev\ubuntu-auto-installer-scripts\cmd\usb-creator\main.go`.
+[x] Add documented OpenCode settings to `C:\dev\ubuntu-auto-installer-scripts\.env.sample`, `C:\dev\ubuntu-auto-installer-scripts\create-usb.bat`, and `C:\dev\ubuntu-auto-installer-scripts\cmd\usb-creator\main.go`.
 
 Dependency: Workstream A variable names are final.
 
@@ -33,7 +34,7 @@ Definition of done: `go test ./...` exits 0 and focused tests confirm that both 
 
 ### Workstream C: Documentation and delivery
 
-[ ] Document the enabled default, GB10 endpoint, model, installed path, and override controls in `C:\dev\ubuntu-auto-installer-scripts\README.md`.
+[~] Document the enabled default, GB10 endpoint, model, installed path, and override controls in `C:\dev\ubuntu-auto-installer-scripts\README.md`.
 
 Dependency: Workstreams A and B are complete.
 
@@ -56,3 +57,8 @@ Definition of done: all focused verification commands exit 0, task files are com
 - 2026-08-23: `git status --short --branch` confirmed clean tracked files on `main`; untracked `agents.md` and `claude.md` are preserved.
 - 2026-08-23: `rg` and focused file reads traced optional-feature installation and both USB configuration paths.
 - 2026-08-23: Official OpenCode documentation confirmed the OpenCode 1 npm package, global configuration location, and compatible-provider schema.
+- 2026-08-23: Added the OpenCode install, merge helper, GB10 settings, both USB propagation paths, tests, and documentation.
+- 2026-08-23: `bash -n scripts/install-optional-features.sh` exited 0.
+- 2026-08-23: `node --test scripts/configure-opencode.test.js` returned 3 passing tests and 0 failures.
+- 2026-08-23: `go test ./...` returned `ok ubuntu-auto-installer/cmd/usb-creator`.
+- 2026-08-23: A live GB10 `/v1/models` query returned HTTP 200 and confirmed `qwen-coder-yarn:latest`.

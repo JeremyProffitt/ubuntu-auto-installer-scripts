@@ -1478,6 +1478,102 @@ install_common_tools() {
     log_info "Common tools installed"
 }
 
+# =============================================================================
+# OPENCODE
+# =============================================================================
+
+install_opencode() {
+    if [ "${INSTALL_OPENCODE:-true}" != "true" ]; then
+        return
+    fi
+
+    log_section "Installing OpenCode with GB10 Configuration"
+
+    local install_username="${INSTALL_USERNAME:-admin}"
+    local user_home
+    local user_group
+    local gb10_base_url="${OPENCODE_GB10_BASE_URL:-http://192.168.40.250:11434/v1}"
+    local gb10_model="${OPENCODE_GB10_MODEL:-qwen-coder-yarn:latest}"
+    local url_pattern='^https?://[A-Za-z0-9._:-]+(/[A-Za-z0-9._~:/-]*)?$'
+    local model_pattern='^[A-Za-z0-9][A-Za-z0-9._:/-]*$'
+
+    user_home=$(getent passwd "$install_username" | cut -d: -f6)
+    user_group=$(id -gn "$install_username" 2>/dev/null)
+    if [ -z "$user_home" ] || [ -z "$user_group" ]; then
+        log_error "Cannot configure OpenCode: install user $install_username does not exist"
+        track_error
+        return 1
+    fi
+
+    if [[ ! "$gb10_base_url" =~ $url_pattern ]]; then
+        log_error "Invalid OPENCODE_GB10_BASE_URL: $gb10_base_url"
+        track_error
+        return 1
+    fi
+    if [[ ! "$gb10_model" =~ $model_pattern ]]; then
+        log_error "Invalid OPENCODE_GB10_MODEL: $gb10_model"
+        track_error
+        return 1
+    fi
+
+    if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
+        log_info "Installing Node.js LTS for OpenCode..."
+        if ! curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - || ! apt-get install -y nodejs; then
+            log_error "Node.js installation for OpenCode failed"
+            track_error
+            return 1
+        fi
+    fi
+
+    log_info "Installing OpenCode CLI..."
+    if ! npm install -g opencode-ai; then
+        log_error "OpenCode CLI installation failed"
+        track_error
+        return 1
+    fi
+
+    local opencode_bin
+    opencode_bin=$(command -v opencode)
+    if [ -z "$opencode_bin" ]; then
+        log_error "OpenCode executable was not found after installation"
+        track_error
+        return 1
+    fi
+
+    local config_dir="$user_home/.config/opencode"
+    local config_file="$config_dir/opencode.json"
+    local configure_script
+    configure_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/configure-opencode.js"
+    install -d -m 700 -o "$install_username" -g "$user_group" "$config_dir"
+
+    if [ ! -f "$configure_script" ]; then
+        log_error "OpenCode configuration helper not found: $configure_script"
+        track_error
+        return 1
+    fi
+
+    if ! node "$configure_script" "$config_file" "$gb10_base_url" "$gb10_model"; then
+        log_error "OpenCode GB10 configuration failed"
+        track_error
+        return 1
+    fi
+
+    chown -R "$install_username:$user_group" "$config_dir"
+    chmod 600 "$config_file"
+
+    local opencode_version
+    opencode_version=$("$opencode_bin" --version 2>&1 | head -1)
+    log_info "OpenCode $opencode_version installed for $install_username"
+    log_info "Default model configured as gb10/$gb10_model via $gb10_base_url"
+
+    if curl -fsS --connect-timeout 5 --max-time 10 "${gb10_base_url%/}/models" | \
+        node -e 'let data=""; process.stdin.on("data", chunk => data += chunk).on("end", () => { try { const body = JSON.parse(data); process.exit(body.data?.some(item => item.id === process.argv[1]) ? 0 : 1) } catch { process.exit(1) } })' "$gb10_model"; then
+        log_info "GB10 endpoint verified model $gb10_model"
+    else
+        log_warn "GB10 endpoint did not report model $gb10_model during installation; OpenCode configuration was still installed"
+    fi
+}
+
 install_dev_tools() {
     if [ "${INSTALL_DEV_TOOLS:-false}" != "true" ]; then
         return
@@ -2013,9 +2109,10 @@ show_menu() {
     echo ""
     echo -e "${YELLOW}Development:${NC}"
     echo " 23. Dev Tools (Go, Python, Node.js, .NET, AI CLIs)"
+    echo " 24. OpenCode (configured for GB10)"
     echo ""
-    echo " 24. Install ALL recommended for home lab"
-    echo " 25. Install ALL recommended for dev workstation"
+    echo " 25. Install ALL recommended for home lab"
+    echo " 26. Install ALL recommended for dev workstation"
     echo "  0. Exit"
     echo ""
 }
@@ -2051,8 +2148,9 @@ interactive_menu() {
             21) ENABLE_WAKE_ON_LAN=true; configure_wakeonlan ;;
             22) INSTALL_COMMON_TOOLS=true; install_common_tools ;;
             23) INSTALL_DEV_TOOLS=true; install_dev_tools ;;
-            24) install_recommended_homelab ;;
-            25) install_recommended_dev_workstation ;;
+            24) INSTALL_OPENCODE=true; install_opencode ;;
+            25) install_recommended_homelab ;;
+            26) install_recommended_dev_workstation ;;
             0)
                 echo "Exiting..."
                 exit 0
@@ -2121,6 +2219,7 @@ install_recommended_dev_workstation() {
 
     # Dev-specific
     INSTALL_DEV_TOOLS=true
+    INSTALL_OPENCODE=true
 
     install_docker
     install_portainer
@@ -2134,6 +2233,7 @@ install_recommended_dev_workstation() {
     install_ansible
     install_common_tools
     install_dev_tools
+    install_opencode
 
     log_info "Recommended dev workstation stack installed!"
     log_info ""
@@ -2145,6 +2245,7 @@ install_recommended_dev_workstation() {
     log_info "  - Claude Code CLI"
     log_info "  - Gemini CLI"
     log_info "  - Continue.dev CLI"
+    log_info "  - OpenCode configured for GB10"
     log_info ""
     log_info "Note: Log out and back in for PATH changes to take effect"
 }
@@ -2200,6 +2301,7 @@ main() {
     configure_ntp
     install_common_tools
     install_dev_tools
+    install_opencode
 
     # Apply kernel sysctl hardening
     log_section "Applying Kernel Sysctl Hardening"

@@ -44,21 +44,24 @@ type DriveInfo struct {
 
 // Config holds the installation configuration
 type Config struct {
-	Username         string
-	Password         string
-	Hostname         string
-	Timezone         string
-	Locale           string
-	KeyboardLayout   string
-	InstallGUI       bool
-	SSHAuthorizedKey string
-	StaticIP         bool
-	IPAddress        string
-	Netmask          string
-	Gateway          string
-	DNSServers       string
-	ExtraPackages    string
-	AutoMountDrives  bool
+	Username          string
+	Password          string
+	Hostname          string
+	Timezone          string
+	Locale            string
+	KeyboardLayout    string
+	InstallGUI        bool
+	SSHAuthorizedKey  string
+	StaticIP          bool
+	IPAddress         string
+	Netmask           string
+	Gateway           string
+	DNSServers        string
+	ExtraPackages     string
+	AutoMountDrives   bool
+	InstallOpenCode   bool
+	OpenCodeGB10URL   string
+	OpenCodeGB10Model string
 }
 
 func main() {
@@ -260,21 +263,24 @@ func loadConfig() (*Config, error) {
 	}
 
 	config := &Config{
-		Username:         username,
-		Password:         password,
-		Hostname:         hostname,
-		Timezone:         getEnvOrDefault(env, "TIMEZONE", "America/New_York"),
-		Locale:           getEnvOrDefault(env, "LOCALE", "en_US.UTF-8"),
-		KeyboardLayout:   getEnvOrDefault(env, "KEYBOARD_LAYOUT", "us"),
-		InstallGUI:       getEnvOrDefault(env, "INSTALL_GUI", "false") == "true",
-		SSHAuthorizedKey: getEnvOrDefault(env, "SSH_AUTHORIZED_KEYS", ""),
-		StaticIP:         getEnvOrDefault(env, "STATIC_IP", "false") == "true",
-		IPAddress:        getEnvOrDefault(env, "IP_ADDRESS", "192.168.1.100"),
-		Netmask:          getEnvOrDefault(env, "NETMASK", "255.255.255.0"),
-		Gateway:          getEnvOrDefault(env, "GATEWAY", "192.168.1.1"),
-		DNSServers:       getEnvOrDefault(env, "DNS_SERVERS", "8.8.8.8,8.8.4.4"),
-		ExtraPackages:    getEnvOrDefault(env, "EXTRA_PACKAGES", "htop,vim,curl,wget,git"),
-		AutoMountDrives:  getEnvOrDefault(env, "AUTO_MOUNT_DRIVES", "true") == "true",
+		Username:          username,
+		Password:          password,
+		Hostname:          hostname,
+		Timezone:          getEnvOrDefault(env, "TIMEZONE", "America/New_York"),
+		Locale:            getEnvOrDefault(env, "LOCALE", "en_US.UTF-8"),
+		KeyboardLayout:    getEnvOrDefault(env, "KEYBOARD_LAYOUT", "us"),
+		InstallGUI:        getEnvOrDefault(env, "INSTALL_GUI", "false") == "true",
+		SSHAuthorizedKey:  getEnvOrDefault(env, "SSH_AUTHORIZED_KEYS", ""),
+		StaticIP:          getEnvOrDefault(env, "STATIC_IP", "false") == "true",
+		IPAddress:         getEnvOrDefault(env, "IP_ADDRESS", "192.168.1.100"),
+		Netmask:           getEnvOrDefault(env, "NETMASK", "255.255.255.0"),
+		Gateway:           getEnvOrDefault(env, "GATEWAY", "192.168.1.1"),
+		DNSServers:        getEnvOrDefault(env, "DNS_SERVERS", "8.8.8.8,8.8.4.4"),
+		ExtraPackages:     getEnvOrDefault(env, "EXTRA_PACKAGES", "htop,vim,curl,wget,git"),
+		AutoMountDrives:   getEnvOrDefault(env, "AUTO_MOUNT_DRIVES", "true") == "true",
+		InstallOpenCode:   getEnvOrDefault(env, "INSTALL_OPENCODE", "true") == "true",
+		OpenCodeGB10URL:   getEnvOrDefault(env, "OPENCODE_GB10_BASE_URL", "http://192.168.40.250:11434/v1"),
+		OpenCodeGB10Model: getEnvOrDefault(env, "OPENCODE_GB10_MODEL", "qwen-coder-yarn:latest"),
 	}
 
 	return config, nil
@@ -542,7 +548,7 @@ exit
 	}
 
 	// Copy scripts from local scripts directory
-	scriptFiles := []string{"install-drivers.sh", "post-install.sh", "mount-drives.sh", "install-gui.sh"}
+	scriptFiles := []string{"install-drivers.sh", "post-install.sh", "mount-drives.sh", "install-gui.sh", "install-optional-features.sh", "configure-opencode.js"}
 	scriptsSrcDir := filepath.Join(filepath.Dir(os.Args[0]), "..", "..", "scripts")
 	if _, err := os.Stat(scriptsSrcDir); os.IsNotExist(err) {
 		scriptsSrcDir = "scripts"
@@ -713,6 +719,9 @@ GATEWAY=%s
 DNS_SERVERS=%s
 EXTRA_PACKAGES=%s
 AUTO_MOUNT_DRIVES=%v
+INSTALL_OPENCODE=%v
+OPENCODE_GB10_BASE_URL=%s
+OPENCODE_GB10_MODEL=%s
 `,
 		config.Username,
 		config.Hostname,
@@ -728,6 +737,9 @@ AUTO_MOUNT_DRIVES=%v
 		config.DNSServers,
 		config.ExtraPackages,
 		config.AutoMountDrives,
+		config.InstallOpenCode,
+		config.OpenCodeGB10URL,
+		config.OpenCodeGB10Model,
 	)
 }
 

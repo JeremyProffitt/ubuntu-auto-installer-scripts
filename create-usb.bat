@@ -511,6 +511,7 @@ if exist "scripts\mount-drives.sh" copy "scripts\mount-drives.sh" "!USB_LETTER!:
 if exist "scripts\install-gui.sh" copy "scripts\install-gui.sh" "!USB_LETTER!:\scripts\" >nul
 if exist "scripts\configure-drives.sh" copy "scripts\configure-drives.sh" "!USB_LETTER!:\scripts\" >nul
 if exist "scripts\install-optional-features.sh" copy "scripts\install-optional-features.sh" "!USB_LETTER!:\scripts\" >nul
+if exist "scripts\configure-opencode.js" copy "scripts\configure-opencode.js" "!USB_LETTER!:\scripts\" >nul
 if exist "scripts\early-setup.sh" copy "scripts\early-setup.sh" "!USB_LETTER!:\scripts\" >nul
 
 :: Convert Windows CRLF line endings to Unix LF for all shell scripts and YAML files
@@ -575,6 +576,9 @@ if exist "!USB_LETTER!:\autoinstall\meta-data" (
     echo INSTALL_COMMON_TOOLS=%INSTALL_COMMON_TOOLS%
     echo INSTALL_DEV_TOOLS=%INSTALL_DEV_TOOLS%
     echo GO_VERSION=%GO_VERSION%
+    echo INSTALL_OPENCODE=%INSTALL_OPENCODE%
+    echo OPENCODE_GB10_BASE_URL=%OPENCODE_GB10_BASE_URL%
+    echo OPENCODE_GB10_MODEL=%OPENCODE_GB10_MODEL%
     echo # Notifications
     echo WEBHOOK_URL=%WEBHOOK_URL%
 ) > "!USB_LETTER!:\scripts\config.env"

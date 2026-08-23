@@ -27,6 +27,7 @@ This installer is specifically designed and tested for:
 - **Optional GUI installation** (Ubuntu Desktop or headless server)
 - **RAID array creation** with mdadm
 - **System utilities included** - swap, NTP, btop, ncdu, jq, and more
+- **OpenCode pre-installed** - configured to use the GB10 Ollama coding model
 - **Configurable via `.env` file**
 - **Works with USB 2.0/3.0 drives**
 
@@ -99,7 +100,16 @@ INSTALL_DOCKER=true            # Docker container runtime
 CONFIGURE_SWAP=true            # 4GB swap file
 CONFIGURE_NTP=true             # Time synchronization
 INSTALL_COMMON_TOOLS=true      # btop, ncdu, jq, rsync, etc.
+INSTALL_OPENCODE=true          # OpenCode AI coding agent
+OPENCODE_GB10_BASE_URL=http://192.168.40.250:11434/v1
+OPENCODE_GB10_MODEL=qwen-coder-yarn:latest
 ```
+
+OpenCode is installed globally with npm. The installer writes the GB10 provider to
+`~/.config/opencode/opencode.json` for the installed user. It preserves other valid
+OpenCode settings and makes a one-time `opencode.json.pre-gb10` backup before it
+changes an existing configuration. Change the endpoint or model in `.env` when the
+GB10 address or served Ollama model changes.
 
 ## Project Structure
 
@@ -260,6 +270,7 @@ The installer includes many optional features that can be enabled in `.env` or i
 | **System** | Swap (4GB) | Configure swap space | ✅ ON | - |
 | | NTP | Time synchronization | ✅ ON | - |
 | | Common Tools | btop, ncdu, jq, etc. | ✅ ON | - |
+| **Development** | OpenCode | AI coding agent configured for GB10 Ollama | ✅ ON | - |
 
 ### Quick Presets in .env
 
