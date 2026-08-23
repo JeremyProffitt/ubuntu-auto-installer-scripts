@@ -61,7 +61,7 @@ Definition of done: focused tests verify new install, existing-file backup, idem
 
 ### Workstream F: Second delivery
 
-[~] Update documentation, run all repository checks, commit only task files, push `main`, and inspect the resulting GitHub workflow state.
+[x] Update documentation, run all repository checks, commit only task files, push `main`, and inspect the resulting GitHub workflow state.
 
 Dependency: Workstreams D and E are complete.
 
@@ -99,3 +99,6 @@ Definition of done: `bash -n scripts/install-optional-features.sh`, `node --test
 - 2026-08-23: A Linux-mode check confirmed `0600` for generated `opencode.json` and `AGENTS.md`; the generated `gb10` provider passed the current OpenCode `ProviderConfig` schema.
 - 2026-08-23: The full published OpenCode schema rejected the custom default `gb10/qwen-coder-yarn:latest` because its generated model enum only lists catalog models; provider-level validation was used for the custom provider fields.
 - 2026-08-23: Static checks confirmed both USB creators and `autoinstall/user-data` copy the portable rules and propagate all numeric settings.
+- 2026-08-23: Commit `b9a96b8` recorded the hardened GB10 configuration and portable global rules.
+- 2026-08-23: `git push origin main` advanced the remote from `075307d` to `b9a96b8`; `git ls-remote` confirmed the remote ref.
+- 2026-08-23: `.github/workflows` still does not exist, so no GitHub Actions workflow was available to monitor.
