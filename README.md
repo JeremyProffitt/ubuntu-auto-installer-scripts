@@ -103,13 +103,23 @@ INSTALL_COMMON_TOOLS=true      # btop, ncdu, jq, rsync, etc.
 INSTALL_OPENCODE=true          # OpenCode AI coding agent
 OPENCODE_GB10_BASE_URL=http://192.168.40.250:11434/v1
 OPENCODE_GB10_MODEL=qwen-coder-yarn:latest
+OPENCODE_GB10_CONTEXT=524288
+OPENCODE_GB10_OUTPUT=32768
+OPENCODE_GB10_TIMEOUT_MS=900000
 ```
 
 OpenCode is installed globally with npm. The installer writes the GB10 provider to
 `~/.config/opencode/opencode.json` for the installed user. It preserves other valid
 OpenCode settings and makes a one-time `opencode.json.pre-gb10` backup before it
 changes an existing configuration. Change the endpoint or model in `.env` when the
-GB10 address or served Ollama model changes.
+GB10 address or served Ollama model changes. The model metadata records the live
+GB10 tool support and 524,288-token context window. The 32,768-token output limit
+and 15-minute request timeout are bounded operational defaults.
+
+The installer also writes compact portable rules to
+`~/.config/opencode/AGENTS.md`. It makes a one-time `AGENTS.md.pre-gb10` backup
+before replacing an existing global rules file. Project-specific `AGENTS.md` files
+continue to add repository rules when OpenCode runs inside those projects.
 
 ## Project Structure
 

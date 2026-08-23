@@ -141,6 +141,7 @@ autoinstall:
     - cp /cdrom/scripts/configure-drives.sh /target/opt/ubuntu-installer-scripts/ 2>/dev/null || true
     - cp /cdrom/scripts/install-optional-features.sh /target/opt/ubuntu-installer-scripts/ 2>/dev/null || true
     - cp /cdrom/scripts/configure-opencode.js /target/opt/ubuntu-installer-scripts/ 2>/dev/null || true
+    - cp /cdrom/scripts/opencode-AGENTS.md /target/opt/ubuntu-installer-scripts/ 2>/dev/null || true
     - chmod +x /target/opt/ubuntu-installer-scripts/*.sh 2>/dev/null || true
 
     # Create symlinks in /opt for backward compatibility

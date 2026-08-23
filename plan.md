@@ -47,13 +47,13 @@ Definition of done: all focused verification commands exit 0, task files are com
 
 ### Workstream D: GB10 model metadata
 
-[~] Add configurable context, output, and timeout values plus verified tool and modality metadata to the generated OpenCode model.
+[x] Add configurable context, output, and timeout values plus verified tool and modality metadata to the generated OpenCode model.
 
 Definition of done: `node --test scripts/configure-opencode.test.js` exits 0 and asserts the exact provider and model metadata.
 
 ### Workstream E: Portable global agent rules
 
-[ ] Install a compact `~/.config/opencode/AGENTS.md` that preserves the existing file in a one-time backup and omits machine-specific credentials, cloud identifiers, and unrelated branch rules.
+[x] Install a compact `~/.config/opencode/AGENTS.md` that preserves the existing file in a one-time backup and omits machine-specific credentials, cloud identifiers, and unrelated branch rules.
 
 Dependency: Workstream D helper interface is final.
 
@@ -61,7 +61,7 @@ Definition of done: focused tests verify new install, existing-file backup, idem
 
 ### Workstream F: Second delivery
 
-[ ] Update documentation, run all repository checks, commit only task files, push `main`, and inspect the resulting GitHub workflow state.
+[~] Update documentation, run all repository checks, commit only task files, push `main`, and inspect the resulting GitHub workflow state.
 
 Dependency: Workstreams D and E are complete.
 
@@ -93,3 +93,9 @@ Definition of done: `bash -n scripts/install-optional-features.sh`, `node --test
 - 2026-08-23: `git push origin main` advanced the remote from `83f3a71` to `4847460`.
 - 2026-08-23: `.github/workflows` does not exist and `gh run list --commit 4847460` returned `[]`; this repository has no workflow to monitor.
 - 2026-08-23: Read the complete `writing-for-agents` skill and the existing global OpenCode `AGENTS.md`; selected a compact always-loaded rule set to reduce context load.
+- 2026-08-23: Added measured GB10 metadata, configurable limits, a 15-minute bounded timeout, and a 45-line portable global OpenCode rules file.
+- 2026-08-23: `node --test scripts/configure-opencode.test.js` returned 3 passing tests and 0 failures, including config and rules backup behavior.
+- 2026-08-23: `bash -n scripts/install-optional-features.sh`, `go test ./...`, and `go vet ./...` exited 0.
+- 2026-08-23: A Linux-mode check confirmed `0600` for generated `opencode.json` and `AGENTS.md`; the generated `gb10` provider passed the current OpenCode `ProviderConfig` schema.
+- 2026-08-23: The full published OpenCode schema rejected the custom default `gb10/qwen-coder-yarn:latest` because its generated model enum only lists catalog models; provider-level validation was used for the custom provider fields.
+- 2026-08-23: Static checks confirmed both USB creators and `autoinstall/user-data` copy the portable rules and propagate all numeric settings.

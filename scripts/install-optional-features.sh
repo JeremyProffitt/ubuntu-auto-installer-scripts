@@ -1494,8 +1494,12 @@ install_opencode() {
     local user_group
     local gb10_base_url="${OPENCODE_GB10_BASE_URL:-http://192.168.40.250:11434/v1}"
     local gb10_model="${OPENCODE_GB10_MODEL:-qwen-coder-yarn:latest}"
+    local gb10_context="${OPENCODE_GB10_CONTEXT:-524288}"
+    local gb10_output="${OPENCODE_GB10_OUTPUT:-32768}"
+    local gb10_timeout_ms="${OPENCODE_GB10_TIMEOUT_MS:-900000}"
     local url_pattern='^https?://[A-Za-z0-9._:-]+(/[A-Za-z0-9._~:/-]*)?$'
     local model_pattern='^[A-Za-z0-9][A-Za-z0-9._:/-]*$'
+    local integer_pattern='^[1-9][0-9]*$'
 
     user_home=$(getent passwd "$install_username" | cut -d: -f6)
     user_group=$(id -gn "$install_username" 2>/dev/null)
@@ -1515,7 +1519,11 @@ install_opencode() {
         track_error
         return 1
     fi
-
+    if [[ ! "$gb10_context" =~ $integer_pattern ]] || [[ ! "$gb10_output" =~ $integer_pattern ]] || [[ ! "$gb10_timeout_ms" =~ $integer_pattern ]]; then
+        log_error "OpenCode context, output, and timeout values must be positive integers"
+        track_error
+        return 1
+    fi
     if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1; then
         log_info "Installing Node.js LTS for OpenCode..."
         if ! curl -fsSL https://deb.nodesource.com/setup_lts.x | bash - || ! apt-get install -y nodejs; then
@@ -1543,16 +1551,20 @@ install_opencode() {
     local config_dir="$user_home/.config/opencode"
     local config_file="$config_dir/opencode.json"
     local configure_script
-    configure_script="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/configure-opencode.js"
+    local agent_rules_file
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    configure_script="$script_dir/configure-opencode.js"
+    agent_rules_file="$script_dir/opencode-AGENTS.md"
     install -d -m 700 -o "$install_username" -g "$user_group" "$config_dir"
 
-    if [ ! -f "$configure_script" ]; then
-        log_error "OpenCode configuration helper not found: $configure_script"
+    if [ ! -f "$configure_script" ] || [ ! -f "$agent_rules_file" ]; then
+        log_error "OpenCode configuration helper or global agent rules file is missing"
         track_error
         return 1
     fi
 
-    if ! node "$configure_script" "$config_file" "$gb10_base_url" "$gb10_model"; then
+    if ! node "$configure_script" "$config_file" "$gb10_base_url" "$gb10_model" "$gb10_context" "$gb10_output" "$gb10_timeout_ms" "$agent_rules_file"; then
         log_error "OpenCode GB10 configuration failed"
         track_error
         return 1
@@ -1565,6 +1577,8 @@ install_opencode() {
     opencode_version=$("$opencode_bin" --version 2>&1 | head -1)
     log_info "OpenCode $opencode_version installed for $install_username"
     log_info "Default model configured as gb10/$gb10_model via $gb10_base_url"
+    log_info "Model context: $gb10_context; output limit: $gb10_output; request timeout: ${gb10_timeout_ms}ms"
+    log_info "Portable global agent rules installed at $config_dir/AGENTS.md"
 
     if curl -fsS --connect-timeout 5 --max-time 10 "${gb10_base_url%/}/models" | \
         node -e 'let data=""; process.stdin.on("data", chunk => data += chunk).on("end", () => { try { const body = JSON.parse(data); process.exit(body.data?.some(item => item.id === process.argv[1]) ? 0 : 1) } catch { process.exit(1) } })' "$gb10_model"; then

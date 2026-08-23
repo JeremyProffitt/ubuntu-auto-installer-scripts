@@ -449,6 +449,12 @@ set "INSTALL_PASSWORD="
 if "!LOCALE!"=="" set "LOCALE=en_US.UTF-8"
 if "!KEYBOARD_LAYOUT!"=="" set "KEYBOARD_LAYOUT=us"
 if "!TIMEZONE!"=="" set "TIMEZONE=America/New_York"
+if "!INSTALL_OPENCODE!"=="" set "INSTALL_OPENCODE=true"
+if "!OPENCODE_GB10_BASE_URL!"=="" set "OPENCODE_GB10_BASE_URL=http://192.168.40.250:11434/v1"
+if "!OPENCODE_GB10_MODEL!"=="" set "OPENCODE_GB10_MODEL=qwen-coder-yarn:latest"
+if "!OPENCODE_GB10_CONTEXT!"=="" set "OPENCODE_GB10_CONTEXT=524288"
+if "!OPENCODE_GB10_OUTPUT!"=="" set "OPENCODE_GB10_OUTPUT=32768"
+if "!OPENCODE_GB10_TIMEOUT_MS!"=="" set "OPENCODE_GB10_TIMEOUT_MS=900000"
 
 :: Create user-data file by copying template and substituting variables
 if not exist "autoinstall\user-data" (
@@ -512,6 +518,7 @@ if exist "scripts\install-gui.sh" copy "scripts\install-gui.sh" "!USB_LETTER!:\s
 if exist "scripts\configure-drives.sh" copy "scripts\configure-drives.sh" "!USB_LETTER!:\scripts\" >nul
 if exist "scripts\install-optional-features.sh" copy "scripts\install-optional-features.sh" "!USB_LETTER!:\scripts\" >nul
 if exist "scripts\configure-opencode.js" copy "scripts\configure-opencode.js" "!USB_LETTER!:\scripts\" >nul
+if exist "scripts\opencode-AGENTS.md" copy "scripts\opencode-AGENTS.md" "!USB_LETTER!:\scripts\" >nul
 if exist "scripts\early-setup.sh" copy "scripts\early-setup.sh" "!USB_LETTER!:\scripts\" >nul
 
 :: Convert Windows CRLF line endings to Unix LF for all shell scripts and YAML files
@@ -579,6 +586,9 @@ if exist "!USB_LETTER!:\autoinstall\meta-data" (
     echo INSTALL_OPENCODE=%INSTALL_OPENCODE%
     echo OPENCODE_GB10_BASE_URL=%OPENCODE_GB10_BASE_URL%
     echo OPENCODE_GB10_MODEL=%OPENCODE_GB10_MODEL%
+    echo OPENCODE_GB10_CONTEXT=%OPENCODE_GB10_CONTEXT%
+    echo OPENCODE_GB10_OUTPUT=%OPENCODE_GB10_OUTPUT%
+    echo OPENCODE_GB10_TIMEOUT_MS=%OPENCODE_GB10_TIMEOUT_MS%
     echo # Notifications
     echo WEBHOOK_URL=%WEBHOOK_URL%
 ) > "!USB_LETTER!:\scripts\config.env"
