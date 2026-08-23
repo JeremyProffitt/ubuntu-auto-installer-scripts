@@ -34,7 +34,7 @@ Definition of done: `go test ./...` exits 0 and focused tests confirm that both 
 
 ### Workstream C: Documentation and delivery
 
-[~] Document the enabled default, GB10 endpoint, model, installed path, and override controls in `C:\dev\ubuntu-auto-installer-scripts\README.md`.
+[x] Document the enabled default, GB10 endpoint, model, installed path, and override controls in `C:\dev\ubuntu-auto-installer-scripts\README.md`.
 
 Dependency: Workstreams A and B are complete.
 
@@ -62,3 +62,6 @@ Definition of done: all focused verification commands exit 0, task files are com
 - 2026-08-23: `node --test scripts/configure-opencode.test.js` returned 3 passing tests and 0 failures.
 - 2026-08-23: `go test ./...` returned `ok ubuntu-auto-installer/cmd/usb-creator`.
 - 2026-08-23: A live GB10 `/v1/models` query returned HTTP 200 and confirmed `qwen-coder-yarn:latest`.
+- 2026-08-23: Commit `4847460` recorded the installer implementation and focused tests.
+- 2026-08-23: `git push origin main` advanced the remote from `83f3a71` to `4847460`.
+- 2026-08-23: `.github/workflows` does not exist and `gh run list --commit 4847460` returned `[]`; this repository has no workflow to monitor.
